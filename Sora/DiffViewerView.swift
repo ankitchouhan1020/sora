@@ -9,12 +9,6 @@ import Foundation
 import PierreDiffsSwift
 import SwiftUI
 
-/// Mutable pipe storage shared by the two background readers in
-/// `DiffTab.runGitData`. Each instance is written by exactly one reader.
-private nonisolated final class DiffPipeData: @unchecked Sendable {
-    var value = Data()
-}
-
 /// Observable inputs for a diff tab's web view. Owned by `DiffTab` and also
 /// retained by the tab's long-lived hosting view, so it must never reference
 /// the `DiffTab` back (that would leak the tab through a retain cycle).
@@ -31,8 +25,8 @@ final class DiffWebModel: nonisolated ObservableObject {
 }
 
 /// A git diff opened as a tab from the git panel. Loads both sides of the
-/// change (via `git show` / the worktree) so they survive tab switches;
-/// reloads when the view reappears.
+/// change (via `git show` / the worktree) when selected so they survive tab
+/// switches.
 @MainActor
 final class DiffTab: nonisolated ObservableObject, nonisolated Identifiable {
     nonisolated let id = UUID()
@@ -62,7 +56,8 @@ final class DiffTab: nonisolated ObservableObject, nonisolated Identifiable {
     )
 
     private nonisolated static let maxBytes = 5 << 20
-    private var reloadGeneration: UInt = 0
+    private var reloadState = DiffReloadState()
+    private var reloadTask: Task<Void, Never>?
 
     init(repoRoot: String, path: String, staged: Bool, untracked: Bool, origPath: String?) {
         self.repoRoot = repoRoot
@@ -71,7 +66,10 @@ final class DiffTab: nonisolated ObservableObject, nonisolated Identifiable {
         self.untracked = untracked
         self.origPath = origPath
         web.fileName = name
-        reload()
+    }
+
+    deinit {
+        reloadTask?.cancel()
     }
 
     var name: String {
@@ -83,8 +81,16 @@ final class DiffTab: nonisolated ObservableObject, nonisolated Identifiable {
     }
 
     func reload() {
-        reloadGeneration &+= 1
-        let generation = reloadGeneration
+        guard reloadState.request() else { return }
+        startReload()
+    }
+
+    func cancelReload() {
+        reloadState.cancel()
+        reloadTask?.cancel()
+    }
+
+    private func startReload() {
         isLoading = true
         error = nil
         let root = repoRoot
@@ -92,44 +98,87 @@ final class DiffTab: nonisolated ObservableObject, nonisolated Identifiable {
         let oldPath = origPath ?? path
         let staged = staged
         let untracked = untracked
+        let cancellation = DiffReloadCancellation()
 
-        Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) {
-                var failureVar: String?
-                let unmerged = !staged && Self.isUnmerged(path: path, in: root)
-                let old: String
-                let new: String
-                if staged {
-                    old = Self.firstGitContent(
-                        ["HEAD:\(oldPath)"], in: root, error: &failureVar
-                    )
-                    new = Self.firstGitContent(
-                        [":\(path)"], in: root, error: &failureVar
-                    )
-                } else {
-                    if untracked {
-                        old = ""
-                    } else {
-                        // An unmerged index has no stage-0 `:path`. Prefer our
-                        // side, then the merge base, so conflict rows show a
-                        // meaningful before-side instead of the whole file as new.
-                        old = Self.firstGitContent(
-                            [":\(oldPath)", ":2:\(oldPath)", ":1:\(oldPath)", "HEAD:\(oldPath)"],
-                            in: root,
-                            error: &failureVar
-                        )
-                    }
-                    new = Self.readWorktreeFile(root: root, path: path, error: &failureVar)
-                }
-                return (old: old, new: new, failure: failureVar, unmerged: unmerged)
-            }.value
-            guard let self, self.reloadGeneration == generation else { return }
-            self.isLoading = false
-            self.error = result.failure
-            self.isUnmerged = result.unmerged
-            self.web.oldContent = result.old
-            self.web.newContent = result.new
+        reloadTask = Task.detached(priority: .userInitiated) { [weak self] in
+            await withTaskCancellationHandler {
+                let result = Self.load(
+                    root: root, path: path, oldPath: oldPath,
+                    staged: staged, untracked: untracked,
+                    cancellation: cancellation
+                )
+                await self?.finishReload(result, cancelled: Task.isCancelled)
+            } onCancel: {
+                cancellation.cancel()
+            }
         }
+    }
+
+    private func finishReload(_ result: ReloadResult, cancelled: Bool) {
+        let cancelled = cancelled || reloadTask?.isCancelled == true
+        reloadTask = nil
+        if reloadState.complete() {
+            reload()
+            return
+        }
+        isLoading = false
+        guard !cancelled else { return }
+        error = result.failure
+        isUnmerged = result.unmerged
+        web.oldContent = result.old
+        web.newContent = result.new
+    }
+
+    private nonisolated struct ReloadResult: Sendable {
+        let old: String
+        let new: String
+        let failure: String?
+        let unmerged: Bool
+    }
+
+    private nonisolated static func load(
+        root: String,
+        path: String,
+        oldPath: String,
+        staged: Bool,
+        untracked: Bool,
+        cancellation: DiffReloadCancellation
+    ) -> ReloadResult {
+        var failure: String?
+        let unmerged = !staged && isUnmerged(
+            path: path, in: root, cancellation: cancellation
+        )
+        let old: String
+        let new: String
+        if staged {
+            old = firstGitContent(
+                ["HEAD:\(oldPath)"], in: root,
+                cancellation: cancellation, error: &failure
+            )
+            new = firstGitContent(
+                [":\(path)"], in: root,
+                cancellation: cancellation, error: &failure
+            )
+        } else {
+            if untracked {
+                old = ""
+            } else {
+                // An unmerged index has no stage-0 `:path`. Prefer our side,
+                // then the merge base, so conflict rows show a meaningful
+                // before-side instead of the whole file as new.
+                old = firstGitContent(
+                    [":\(oldPath)", ":2:\(oldPath)", ":1:\(oldPath)", "HEAD:\(oldPath)"],
+                    in: root,
+                    cancellation: cancellation,
+                    error: &failure
+                )
+            }
+            new = readWorktreeFile(
+                root: root, path: path,
+                cancellation: cancellation, error: &failure
+            )
+        }
+        return ReloadResult(old: old, new: new, failure: failure, unmerged: unmerged)
     }
 
     private nonisolated enum GitContent {
@@ -140,10 +189,14 @@ final class DiffTab: nonisolated ObservableObject, nonisolated Identifiable {
     }
 
     private nonisolated static func firstGitContent(
-        _ specs: [String], in root: String, error: inout String?
+        _ specs: [String],
+        in root: String,
+        cancellation: DiffReloadCancellation,
+        error: inout String?
     ) -> String {
         for spec in specs {
-            switch gitContent(spec, in: root) {
+            guard !cancellation.isCancelled else { return "" }
+            switch gitContent(spec, in: root, cancellation: cancellation) {
             case .missing:
                 continue
             case .content(let content):
@@ -159,12 +212,17 @@ final class DiffTab: nonisolated ObservableObject, nonisolated Identifiable {
         return ""
     }
 
-    private nonisolated static func gitContent(_ spec: String, in root: String) -> GitContent {
-        let size = GitStatusModel.runGit(["cat-file", "-s", spec], in: root)
+    private nonisolated static func gitContent(
+        _ spec: String, in root: String, cancellation: DiffReloadCancellation
+    ) -> GitContent {
+        let size = runGitData(["cat-file", "-s", spec], in: root, cancellation: cancellation)
         guard size.status == 0 else { return .missing }
-        let byteCount = Int(size.stdout.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        let sizeText = String(data: size.stdout, encoding: .utf8) ?? ""
+        let byteCount = Int(sizeText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         guard byteCount <= maxBytes else { return .tooLarge }
-        let run = runGitData(["cat-file", "blob", spec], in: root)
+        let run = runGitData(
+            ["cat-file", "blob", spec], in: root, cancellation: cancellation
+        )
         guard run.status == 0 else { return .missing }
         guard run.stdout.count <= maxBytes else { return .tooLarge }
         guard !run.stdout.contains(0),
@@ -179,78 +237,43 @@ final class DiffTab: nonisolated ObservableObject, nonisolated Identifiable {
     /// Diff blobs need their original bytes so invalid UTF-8 and embedded NULs
     /// cannot be mistaken for an empty text file.
     private nonisolated static func runGitData(
-        _ args: [String], in root: String
+        _ args: [String], in root: String, cancellation: DiffReloadCancellation
     ) -> (status: Int32, stdout: Data, stderr: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = args
-        process.currentDirectoryURL = URL(fileURLWithPath: root, isDirectory: true)
-        var environment = ProcessInfo.processInfo.environment
-        environment["GIT_OPTIONAL_LOCKS"] = "0"
-        environment["GIT_TERMINAL_PROMPT"] = "0"
-        environment["LC_ALL"] = "C"
-        process.environment = environment
-
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-        process.standardInput = FileHandle.nullDevice
-
-        do {
-            try process.run()
-        } catch {
-            return (-1, Data(), error.localizedDescription)
+        guard !cancellation.isCancelled else { return (-1, Data(), "Cancelled") }
+        // Keep one byte beyond the content limit so a blob changed between
+        // cat-file's size check and read is still rejected as oversized.
+        let run = GitProcess.run(args, in: root, stdoutLimit: maxBytes + 1)
+        let stderr: String
+        if let launchError = run.launchError {
+            stderr = launchError
+        } else if run.cancelled || cancellation.isCancelled {
+            stderr = "Git command cancelled."
+        } else if run.timedOut {
+            stderr = "Git command timed out."
+        } else {
+            stderr = String(data: run.stderr, encoding: .utf8) ?? ""
         }
-
-        let outData = DiffPipeData()
-        let errData = DiffPipeData()
-        let captureLimit = maxBytes + 1
-        let readers = DispatchGroup()
-        readers.enter()
-        DispatchQueue.global(qos: .utility).async {
-            // Drain the pipe so Git cannot deadlock, but retain at most one
-            // byte beyond the limit. The index may change between cat-file's
-            // size check and this read while an agent is working.
-            while true {
-                let chunk: Data
-                do {
-                    guard let next = try stdout.fileHandleForReading.read(upToCount: 64 * 1024),
-                          !next.isEmpty else { break }
-                    chunk = next
-                } catch {
-                    break
-                }
-                let remaining = captureLimit - outData.value.count
-                if remaining > 0 {
-                    outData.value.append(chunk.prefix(remaining))
-                }
-            }
-            readers.leave()
-        }
-        readers.enter()
-        DispatchQueue.global(qos: .utility).async {
-            errData.value = stderr.fileHandleForReading.readDataToEndOfFile()
-            readers.leave()
-        }
-        process.waitUntilExit()
-        readers.wait()
-        return (
-            process.terminationStatus,
-            outData.value,
-            String(data: errData.value, encoding: .utf8) ?? ""
-        )
+        let failed = run.launchError != nil || run.cancelled
+            || cancellation.isCancelled || run.timedOut
+        return (failed ? -1 : run.status, run.stdout, stderr)
     }
 
-    private nonisolated static func isUnmerged(path: String, in root: String) -> Bool {
-        let run = GitStatusModel.runGit(
-            ["--literal-pathspecs", "ls-files", "--unmerged", "--", path], in: root
+    private nonisolated static func isUnmerged(
+        path: String, in root: String, cancellation: DiffReloadCancellation
+    ) -> Bool {
+        let run = runGitData(
+            ["--literal-pathspecs", "ls-files", "--unmerged", "--", path],
+            in: root,
+            cancellation: cancellation
         )
         return run.status == 0 && !run.stdout.isEmpty
     }
 
     private nonisolated static func readWorktreeFile(
-        root: String, path: String, error: inout String?
+        root: String,
+        path: String,
+        cancellation: DiffReloadCancellation,
+        error: inout String?
     ) -> String {
         let url = URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent(path)
         let fm = FileManager.default
@@ -276,6 +299,7 @@ final class DiffTab: nonisolated ObservableObject, nonisolated Identifiable {
 
             var data = Data()
             while data.count < maxBytes {
+                guard !cancellation.isCancelled else { return "" }
                 let remaining = min(64 * 1024, maxBytes - data.count)
                 guard let chunk = try handle.read(upToCount: remaining), !chunk.isEmpty else {
                     break
@@ -469,11 +493,18 @@ struct DiffViewerView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .onAppear { diff.reload() }
+        .onAppear {
+            if isSelected { diff.reload() }
+        }
         .onChange(of: isSelected) {
             if isSelected {
                 diff.reload()
+            } else {
+                diff.cancelReload()
             }
+        }
+        .onDisappear {
+            if isSelected { diff.cancelReload() }
         }
     }
 

@@ -123,7 +123,11 @@ enum SessionStore {
     private static let key = "sessionSnapshot"
 
     static func save(_ windows: [SessionSnapshot]) {
-        guard let data = try? JSONEncoder().encode(AppSnapshot(windows: windows)) else { return }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(AppSnapshot(windows: windows)),
+              data != UserDefaults.standard.data(forKey: key)
+        else { return }
         UserDefaults.standard.set(data, forKey: key)
     }
 

@@ -183,6 +183,15 @@ enum TerminalActivity: Equatable {
     }
 }
 
+/// Visible terminals update promptly; parked terminals and inactive windows
+/// keep a slower heartbeat so background agents are still discovered without
+/// every shell walking the process table twice a second.
+nonisolated enum TerminalActivityMonitorPolicy {
+    static func interval(isVisible: Bool, applicationIsActive: Bool) -> Duration {
+        isVisible && applicationIsActive ? .milliseconds(500) : .seconds(2)
+    }
+}
+
 /// Requires a stable second observation before publishing a transition. This
 /// hides short-lived process metadata races when jobs start and exit.
 struct TerminalActivityTracker {

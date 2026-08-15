@@ -19,6 +19,8 @@ import Foundation
 @MainActor
 final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated Identifiable {
     nonisolated let id: UUID
+    /// Stable sidecar key keeps unchanged scrollback byte-identical across autosaves.
+    let historyKey: String
 
     @Published var title: String
     @Published var workingDirectory: String?
@@ -53,15 +55,18 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
     private var agentStateTracker = AgentStateTracker()
     private var isTerminating = false
     private var commandExecutionStartedAtNanos: UInt64?
+    private var isSurfaceVisible = false
 
     init(
         initialDirectory: String? = nil,
         restoredHistory: String? = nil,
+        restoredHistoryKey: String? = nil,
         commandArguments: [String]? = nil,
         environmentPath: String? = nil
     ) {
         let id = UUID()
         self.id = id
+        historyKey = restoredHistoryKey ?? UUID().uuidString
         let directCommand = commandArguments.flatMap { $0.isEmpty ? nil : $0 }
         let shellPath = directCommand?.first ?? Self.loginShell()
         let directory = Self.validWorkingDirectory(initialDirectory)
@@ -152,7 +157,7 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
         // TerminalHostView normally clears these while dismantling, but close
         // teardown must not depend on a later SwiftUI reconciliation pass.
         // These callbacks originate on PaneView and capture this session.
-        surface.setSurfaceVisible(false)
+        setSurfaceVisible(false)
         surface.onBecomeFirstResponder = nil
         surface.splitTarget.onSplit = nil
         surface.splitTarget.onNewBrowserTab = nil
@@ -203,6 +208,13 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
         try? FileManager.default.removeItem(at: launchDirectoryURL)
     }
 
+    /// Keeps renderer visibility and process-monitor cadence on the same edge.
+    /// Parked/background terminals still poll, just not at interactive speed.
+    func setSurfaceVisible(_ visible: Bool) {
+        isSurfaceVisible = visible
+        surface.setSurfaceVisible(visible)
+    }
+
     private func startActivityMonitoring() {
         activityMonitorTask = Task { @MainActor [weak self] in
             while let self, !Task.isCancelled, !self.hasExited {
@@ -235,7 +247,10 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
                         }
                     }
                 }
-                try? await Task.sleep(for: .milliseconds(500))
+                try? await Task.sleep(for: TerminalActivityMonitorPolicy.interval(
+                    isVisible: self.isSurfaceVisible,
+                    applicationIsActive: NSApp.isActive
+                ))
             }
         }
     }

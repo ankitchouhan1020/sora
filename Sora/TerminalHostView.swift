@@ -28,11 +28,10 @@ struct TerminalHostView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSView {
         let container = TerminalContainerView()
+        container.session = session
         container.terminal = session.surface
         container.focusOnAppear = isFocused
         let terminal = session.surface
-        // Coming out of parking: let the renderer draw again.
-        terminal.setSurfaceVisible(true)
         terminal.onBecomeFirstResponder = onFocused
         terminal.splitTarget.onSplit = onSplit
         terminal.splitTarget.onNewBrowserTab = onNewBrowserTab
@@ -70,7 +69,6 @@ struct TerminalHostView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: NSView, context: Context) {
-        session.surface.setSurfaceVisible(true)
         session.surface.onBecomeFirstResponder = onFocused
         session.surface.splitTarget.onSplit = onSplit
         session.surface.splitTarget.onNewBrowserTab = onNewBrowserTab
@@ -104,6 +102,7 @@ struct TerminalHostView: NSViewRepresentable {
         terminal.splitTarget.onNewBrowserPane = nil
         terminal.splitTarget.onNewFileTab = nil
         terminal.splitTarget.onNewFilePane = nil
+        container.session = nil
         container.terminal = nil
     }
 
@@ -162,7 +161,7 @@ final class TerminalParkingContainerView: NSView {
             // lets the backend drop the renderer's pane-sized IOSurfaces
             // (~20 MB each) while its wakeup check — gated on attachment,
             // not visibility — keeps title/bell/exit events draining.
-            terminal.setSurfaceVisible(false)
+            session.setSurfaceVisible(false)
             guard terminal.superview !== self else { continue }
             let parkedSize = terminal.frame.size
             if terminal.window?.firstResponder === terminal {
@@ -192,6 +191,7 @@ final class TerminalParkingContainerView: NSView {
 /// and when navigation moves focus here. `TerminalHostView` drives the edge;
 /// this only performs the makeFirstResponder.
 private final class TerminalContainerView: NSView {
+    weak var session: TerminalSession?
     weak var terminal: NSView?
     var focusOnAppear = true {
         didSet {
@@ -237,12 +237,13 @@ private final class TerminalContainerView: NSView {
         guard needsSurfaceActivation,
               window != nil,
               bounds.width > 0, bounds.height > 0,
-              let terminal = terminal as? any TerminalBackendSurface,
+              let session,
+              let terminal,
               terminal.window != nil,
               terminal.bounds.width > 0, terminal.bounds.height > 0
         else { return }
         needsSurfaceActivation = false
-        terminal.setSurfaceVisible(true)
+        session.setSurfaceVisible(true)
     }
 
     @objc private func windowDidBecomeKey(_ notification: Notification) {

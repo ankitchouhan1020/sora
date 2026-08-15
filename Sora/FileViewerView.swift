@@ -50,6 +50,7 @@ final class FileTab: nonisolated ObservableObject, nonisolated Identifiable {
     weak var editorView: NSView?
 
     private nonisolated static let maxTextBytes = 5 << 20
+    private nonisolated static let maxImageBytes = 100 << 20
     private nonisolated static let imageExtensions: Set<String> = [
         "png", "jpg", "jpeg", "gif", "heic", "webp", "tiff", "bmp", "icns",
     ]
@@ -170,18 +171,23 @@ final class FileTab: nonisolated ObservableObject, nonisolated Identifiable {
         let expectedPath = path
 
         reloadTask = Task { [weak self] in
-            let data = await Task.detached(priority: .userInitiated) {
+            let readTask = Task.detached(priority: .userInitiated) {
                 Self.readData(path: expectedPath)
-            }.value
+            }
+            let read = await withTaskCancellationHandler {
+                await readTask.value
+            } onCancel: {
+                readTask.cancel()
+            }
             guard !Task.isCancelled,
+                  let loaded = Self.loadedContent(path: expectedPath, read: read),
                   let self,
                   self.reloadGeneration == generation,
                   self.path == expectedPath,
-                  !self.isDirty
+                  !self.isDirty,
+                  !self.matches(loaded)
             else { return }
 
-            let loaded = Self.loadedContent(path: expectedPath, data: data)
-            guard !self.matches(loaded) else { return }
             self.content = loaded.content
             self.text = loaded.text
             self.savedText = loaded.text
@@ -211,22 +217,38 @@ final class FileTab: nonisolated ObservableObject, nonisolated Identifiable {
     }
 
     private static func load(path: String) -> LoadedContent {
-        loadedContent(path: path, data: readData(path: path))
+        loadedContent(path: path, read: readData(path: path)) ?? LoadedContent(
+            content: .unavailable("Could not read file"), text: "", imageFingerprint: nil
+        )
     }
 
-    private nonisolated static func readData(path: String) -> Data? {
-        try? Data(contentsOf: URL(fileURLWithPath: path))
-    }
-
-    private static func loadedContent(path: String, data: Data?) -> LoadedContent {
+    private nonisolated static func readData(path: String) -> BoundedFileRead {
         let url = URL(fileURLWithPath: path)
-        guard let data else {
+        let isImage = imageExtensions.contains(url.pathExtension.lowercased())
+        return BoundedIO.readFile(at: url, limit: isImage ? maxImageBytes : maxTextBytes)
+    }
+
+    private static func loadedContent(path: String, read: BoundedFileRead) -> LoadedContent? {
+        let data: Data
+        switch read {
+        case .data(let value):
+            data = value
+        case .tooLarge:
+            return LoadedContent(
+                content: .unavailable("File is too large to open"),
+                text: "",
+                imageFingerprint: nil
+            )
+        case .failed:
             return LoadedContent(
                 content: .unavailable("Could not read file"),
                 text: "",
                 imageFingerprint: nil
             )
+        case .cancelled:
+            return nil
         }
+        let url = URL(fileURLWithPath: path)
         if imageExtensions.contains(url.pathExtension.lowercased()),
            let image = NSImage(data: data) {
             return LoadedContent(

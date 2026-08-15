@@ -16,24 +16,30 @@ import Foundation
 final class Project: nonisolated ObservableObject, nonisolated Identifiable {
     nonisolated let id = UUID()
 
+    /// Layout changes that belong in the restoration snapshot. Kept separate
+    /// from display-only terminal activity so autosave does no work for it.
+    let snapshotDidChange = PassthroughSubject<Void, Never>()
+
     /// User-assigned name; when nil the project title follows the
     /// selected session's terminal title.
-    @Published var customName: String?
+    @Published var customName: String? { didSet { snapshotDidChange.send() } }
     /// User-owned glyph shown in the Space navigator, typically an emoji.
-    @Published var customIcon: String?
+    @Published var customIcon: String? { didSet { snapshotDidChange.send() } }
     /// User-pinned project directory ("Set Project Directory…" on the
     /// project row). When set, the file tree and git panels always anchor
     /// here. Nil means automatic: the closest git repository containing the
     /// selected session's working directory, re-derived as the session
     /// moves (see `panelRoot(followingSessionAt:)`).
-    @Published var customDirectory: String?
+    @Published var customDirectory: String? { didSet { snapshotDidChange.send() } }
     /// Repository roots explicitly attached when the Space is created.
     /// Their order is user-owned; the first is the default for new terminals.
-    @Published var repositories: [String] = []
-    @Published var tabs: [PaneTab] = []
+    @Published var repositories: [String] = [] { didSet { snapshotDidChange.send() } }
+    @Published var tabs: [PaneTab] = [] { didSet { snapshotDidChange.send() } }
     @Published var selectedTabID: UUID? {
         didSet {
-            guard selectedTabID != oldValue, let selectedTabID else { return }
+            guard selectedTabID != oldValue else { return }
+            snapshotDidChange.send()
+            guard let selectedTabID else { return }
             recentTabIDs.removeAll { $0 == selectedTabID }
             recentTabIDs.insert(selectedTabID, at: 0)
             markSelectedAgentsSeen()
@@ -42,16 +48,16 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
 
     private var recentTabIDs: [UUID] = []
     private let fallbackName: String
-    /// Sessions publish their own changes (title, directory); re-publish them
-    /// so the project name and views observing the project stay current.
+    /// Sessions publish their display changes so the project name and parent
+    /// chrome stay current without forwarding prompt/input lifecycle churn.
     private var sessionObservations: [UUID: AnyCancellable] = [:]
-    /// Tabs publish layout changes (splits, focus, resize); re-publish them so
-    /// the strip re-renders and autosave fires.
+    private var sessionSnapshotObservations: [UUID: AnyCancellable] = [:]
+    /// Tabs re-publish all UI changes while persisted layout changes drive save.
     private var tabObservations: [UUID: AnyCancellable] = [:]
-    /// Browser navigation changes the tab's automatic title and persisted URL.
-    /// Re-publish it through the project just like a terminal's live title and
-    /// working directory.
+    private var tabSnapshotObservations: [UUID: AnyCancellable] = [:]
+    /// Browser UI changes stay live, but only navigation drives save.
     private var browserObservations: [UUID: AnyCancellable] = [:]
+    private var browserSnapshotObservations: [UUID: AnyCancellable] = [:]
 
     /// Pass `createInitialSession: false` when restoring a saved project;
     /// the caller then rebuilds the tabs itself.
@@ -207,6 +213,7 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
     private func makeSession(
         directory: String? = nil,
         restoredHistory: String? = nil,
+        restoredHistoryKey: String? = nil,
         commandArguments: [String]? = nil,
         environmentPath: String? = nil
     ) -> TerminalSession {
@@ -216,6 +223,7 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
                 ?? selectedSession?.currentDirectoryPath
                 ?? repositories.first,
             restoredHistory: restoredHistory,
+            restoredHistoryKey: restoredHistoryKey,
             commandArguments: commandArguments,
             environmentPath: environmentPath
         )
@@ -223,13 +231,29 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
             // Already dead — just drop its pane, no second terminate.
             self?.closeContent(.session(session), terminate: false)
         }
-        sessionObservations[session.id] = session.objectWillChange.sink { [weak self] _ in
+        // Only values used by parent-level chrome fan out through Project and
+        // Manager. Prompt/input lifecycle churn stays with direct session
+        // observers instead of invalidating the whole window and parking scan.
+        let displayChanges = Publishers.MergeMany([
+            session.$title.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            session.$workingDirectory.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            session.$activity.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            session.$agentState.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            session.$foregroundDirectoryPath.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            session.$commandLifecycle.map(\.completionSequence).removeDuplicates().dropFirst()
+                .map { _ in () }.eraseToAnyPublisher()
+        ])
+        sessionObservations[session.id] = displayChanges.sink { [weak self] _ in
             // @Published emits before the session property changes. Forward on
-            // the next turn so parent views read the new activity/title/path.
+            // the next turn so parent views read the new value.
             DispatchQueue.main.async { [weak self] in
                 self?.objectWillChange.send()
             }
         }
+        sessionSnapshotObservations[session.id] = session.$workingDirectory
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.snapshotDidChange.send() }
         return session
     }
 
@@ -377,6 +401,10 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
         browserObservations[browser.id] = browser.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+        browserSnapshotObservations[browser.id] = browser.$urlString
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.snapshotDidChange.send() }
         return browser
     }
 
@@ -405,11 +433,14 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
     ) {
         if let (tab, pane) = findDiffPane(repoRoot: repoRoot, path: path, staged: staged),
            case .diff(let diff) = pane.content {
+            let wasSelected = selectedTabID == tab.id
             diff.untracked = untracked
             diff.origPath = origPath
-            diff.reload()
             selectedTabID = tab.id
             tab.focusedPaneID = pane.id
+            // Selection refreshes a hidden diff; clicking the already-visible
+            // row still needs an explicit refresh.
+            if wasSelected { diff.reload() }
             return
         }
         let context = selectedSession
@@ -688,6 +719,12 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
         tabObservations[tab.id] = tab.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+        tabSnapshotObservations[tab.id] = Publishers.MergeMany([
+            tab.$customName.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            tab.$isPinned.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            tab.$columns.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            tab.$focusedPaneID.dropFirst().map { _ in () }.eraseToAnyPublisher()
+        ]).sink { [weak self] _ in self?.snapshotDidChange.send() }
         return tab
     }
 
@@ -704,7 +741,11 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
             for paneSnap in columnSnap.panes {
                 let restoredHistory = paneSnap.historyKey.flatMap { histories[$0] }
                 panes.append(Pane(
-                    content: makeContent(from: paneSnap.content, restoredHistory: restoredHistory),
+                    content: makeContent(
+                        from: paneSnap.content,
+                        restoredHistory: restoredHistory,
+                        restoredHistoryKey: paneSnap.historyKey
+                    ),
                     weight: CGFloat(paneSnap.weight)
                 ))
             }
@@ -729,11 +770,16 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
 
     private func makeContent(
         from snap: SessionSnapshot.ProjectSnapshot.PaneContentSnapshot,
-        restoredHistory: String? = nil
+        restoredHistory: String? = nil,
+        restoredHistoryKey: String? = nil
     ) -> PaneContent {
         switch snap {
         case .session(let workingDirectory):
-            return .session(makeSession(directory: workingDirectory, restoredHistory: restoredHistory))
+            return .session(makeSession(
+                directory: workingDirectory,
+                restoredHistory: restoredHistory,
+                restoredHistoryKey: restoredHistoryKey
+            ))
         case .file(let path, let editorState):
             let file = FileTab(path: path)
             if let editorState { file.editorState = editorState }
@@ -779,7 +825,9 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
             guard let paneID = tab.paneID(forContent: contentID) else { continue }
             // Keyed by content id; no-ops for the other content kinds.
             sessionObservations[contentID] = nil
+            sessionSnapshotObservations[contentID] = nil
             browserObservations[contentID] = nil
+            browserSnapshotObservations[contentID] = nil
             if !tab.removePane(paneID) {
                 remove(tabID: tab.id)
             }
@@ -792,11 +840,14 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
         let tab = tabs[index]
         for session in tab.sessions {
             sessionObservations[session.id] = nil
+            sessionSnapshotObservations[session.id] = nil
         }
         for browser in tab.browsers {
             browserObservations[browser.id] = nil
+            browserSnapshotObservations[browser.id] = nil
         }
         tabObservations[tabID] = nil
+        tabSnapshotObservations[tabID] = nil
         recentTabIDs.removeAll { $0 == tabID }
         tabs.remove(at: index)
         if selectedTabID == tabID {

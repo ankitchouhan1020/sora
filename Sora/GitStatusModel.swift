@@ -628,7 +628,11 @@ final class GitStatusModel: nonisolated ObservableObject {
 
                 for args in commands {
                     transcript.append("$ git " + Self.displayCommand(args))
-                    let run = Self.runGit(args, in: dir)
+                    let run = Self.runGit(
+                        args, in: dir,
+                        timeout: GitProcess.operationTimeout,
+                        disableHooks: false
+                    )
                     let text = [run.stdout, run.stderr]
                         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                         .filter { !$0.isEmpty }
@@ -813,10 +817,6 @@ final class GitStatusModel: nonisolated ObservableObject {
         let failure: String?
     }
 
-    private nonisolated final class PipeData: @unchecked Sendable {
-        var value = Data()
-    }
-
     private func invalidateStatusRefresh() {
         statusRequestID &+= 1
         isRefreshing = false
@@ -974,56 +974,31 @@ final class GitStatusModel: nonisolated ObservableObject {
         var loadedDetails = false
     }
 
-    /// Runs Git while draining stdout and stderr concurrently. Reading either
-    /// pipe only after the process exits can deadlock when the other fills.
+    /// Read-only calls have a short lifetime and no hooks; user operations
+    /// preserve hooks but still run off-main with a bounded lifetime/output.
     nonisolated static func runGit(
-        _ args: [String], in dir: String
+        _ args: [String],
+        in dir: String,
+        timeout: TimeInterval = GitProcess.readTimeout,
+        disableHooks: Bool = true
     ) -> (status: Int32, stdout: String, stderr: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = args
-        process.currentDirectoryURL = URL(fileURLWithPath: dir, isDirectory: true)
-        var env = ProcessInfo.processInfo.environment
-        env["GIT_OPTIONAL_LOCKS"] = "0"
-        // Fail rather than hanging on a credential prompt behind the app.
-        env["GIT_TERMINAL_PROMPT"] = "0"
-        // Git diagnostics are parsed only to distinguish an ordinary folder
-        // from a broken repository. Pinning the locale makes that safe and
-        // also keeps relative dates stable in the compact history list.
-        env["LC_ALL"] = "C"
-        process.environment = env
-
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-        process.standardInput = FileHandle.nullDevice
-
-        do {
-            try process.run()
-        } catch {
-            return (-1, "", error.localizedDescription)
-        }
-        let outData = PipeData()
-        let errData = PipeData()
-        let readers = DispatchGroup()
-        readers.enter()
-        DispatchQueue.global(qos: .utility).async {
-            outData.value = stdout.fileHandleForReading.readDataToEndOfFile()
-            readers.leave()
-        }
-        readers.enter()
-        DispatchQueue.global(qos: .utility).async {
-            errData.value = stderr.fileHandleForReading.readDataToEndOfFile()
-            readers.leave()
-        }
-        process.waitUntilExit()
-        readers.wait()
-        return (
-            process.terminationStatus,
-            String(data: outData.value, encoding: .utf8) ?? "",
-            String(data: errData.value, encoding: .utf8) ?? ""
+        let run = GitProcess.run(
+            args, in: dir, timeout: timeout, disableHooks: disableHooks
         )
+        let stdout = String(data: run.stdout, encoding: .utf8) ?? ""
+        var stderr = String(data: run.stderr, encoding: .utf8) ?? ""
+        if let launchError = run.launchError {
+            stderr = launchError
+        } else if run.cancelled {
+            stderr = "Git command cancelled."
+        } else if run.timedOut {
+            stderr = "Git command timed out."
+        } else if run.stdoutTruncated || run.stderrTruncated {
+            stderr = "Git output exceeded the safe limit."
+        }
+        let failed = run.launchError != nil || run.cancelled || run.timedOut
+            || run.stdoutTruncated || run.stderrTruncated
+        return (failed ? -1 : run.status, stdout, stderr)
     }
 
     /// Resolves the active repository and distinguishes a normal non-repo

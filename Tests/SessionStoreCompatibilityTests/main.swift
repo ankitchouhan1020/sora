@@ -4,7 +4,17 @@ struct EditorState: Codable {}
 enum RightPanel: String, Codable { case files, git, beads, info }
 
 let tab = SessionSnapshot.ProjectSnapshot.TabSnapshot(
-    columns: [], focusedColumn: 0, focusedRow: 0, isPinned: true
+    columns: [.init(
+        panes: [.init(
+            content: .session(workingDirectory: "/tmp"),
+            weight: 1,
+            historyKey: "stable-history-key"
+        )],
+        weight: 1
+    )],
+    focusedColumn: 0,
+    focusedRow: 0,
+    isPinned: true
 )
 let encoded = try JSONEncoder().encode(tab)
 let restored = try JSONDecoder().decode(
@@ -12,6 +22,7 @@ let restored = try JSONDecoder().decode(
     from: encoded
 )
 assert(restored.isPinned == true)
+assert(restored.columns[0].panes[0].historyKey == "stable-history-key")
 
 var legacyObject = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
 legacyObject.removeValue(forKey: "isPinned")

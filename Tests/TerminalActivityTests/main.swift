@@ -1,6 +1,16 @@
 import Darwin
 import Foundation
 
+assert(TerminalActivityMonitorPolicy.interval(
+    isVisible: true, applicationIsActive: true
+) == .milliseconds(500))
+assert(TerminalActivityMonitorPolicy.interval(
+    isVisible: false, applicationIsActive: true
+) == .seconds(2))
+assert(TerminalActivityMonitorPolicy.interval(
+    isVisible: true, applicationIsActive: false
+) == .seconds(2))
+
 private func snapshot(_ name: String, group: pid_t = 20) -> TerminalProcessSnapshot {
     TerminalProcessSnapshot(
         processGroupID: group,

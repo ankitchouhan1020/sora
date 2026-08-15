@@ -55,6 +55,11 @@ final class TerminalManager: nonisolated ObservableObject {
     /// Projects publish their own changes (session list, session selection);
     /// re-publish them so views observing the manager stay current.
     private var projectObservations: [UUID: AnyCancellable] = [:]
+    /// Project publishers fire before mutation. Forward once on the next turn
+    /// so observers read settled state without queueing one block per change.
+    private var projectChangeForwardingScheduled = false
+    private var projectSnapshotObservations: [UUID: AnyCancellable] = [:]
+    private let snapshotDidChange = PassthroughSubject<Void, Never>()
     private var projectCounter = 0
     private var settingsObservation: AnyCancellable?
     private var autosaveObservation: AnyCancellable?
@@ -152,14 +157,21 @@ final class TerminalManager: nonisolated ObservableObject {
             .sink { [weak self] _ in
                 self?.refreshAppearance()
             }
-        // Every project/tab/selection change re-publishes through the manager,
-        // so a debounced sink snapshots layout after mutations settle without
-        // reading live terminal contents.
-        autosaveObservation = objectWillChange
-            .debounce(for: .milliseconds(500), scheduler: DispatchQueue.main)
-            .sink { _ in
-                TerminalManager.saveAll(captureTerminalHistory: false)
-            }
+        // Persist only restorable layout changes. Terminal activity still
+        // refreshes chrome through objectWillChange, but must not rebuild every
+        // window snapshot or touch history storage.
+        autosaveObservation = Publishers.MergeMany([
+            $projects.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $selectedProjectID.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $isPanelVisible.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $panelTab.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $isLeftSidebarVisible.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            snapshotDidChange.eraseToAnyPublisher()
+        ])
+        .debounce(for: .milliseconds(500), scheduler: DispatchQueue.main)
+        .sink { _ in
+            TerminalManager.saveAll(captureTerminalHistory: false)
+        }
         // The debounce can swallow changes made just before quitting;
         // capture a final snapshot while the shells are still alive.
         terminationObservation = NotificationCenter.default
@@ -396,7 +408,16 @@ final class TerminalManager: nonisolated ObservableObject {
             createInitialSession: createInitialSession
         )
         projectObservations[project.id] = project.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
+            guard let self, !self.projectChangeForwardingScheduled else { return }
+            self.projectChangeForwardingScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.projectChangeForwardingScheduled = false
+                self.objectWillChange.send()
+            }
+        }
+        projectSnapshotObservations[project.id] = project.snapshotDidChange.sink { [weak self] _ in
+            self?.snapshotDidChange.send()
         }
         return project
     }
@@ -440,6 +461,7 @@ final class TerminalManager: nonisolated ObservableObject {
         guard let index = projects.firstIndex(where: { $0.id == project.id }) else { return }
         projects.remove(at: index)
         projectObservations[project.id] = nil
+        projectSnapshotObservations[project.id] = nil
         if selectedProjectID == project.id {
             selectedProjectID = projects.isEmpty
                 ? nil
@@ -905,9 +927,8 @@ final class TerminalManager: nonisolated ObservableObject {
                                    let history = session.serializedHistory(
                                        captureLive: captureTerminalHistory
                                    ), !history.isEmpty {
-                                    let key = UUID().uuidString
-                                    histories[key] = history
-                                    historyKey = key
+                                    histories[session.historyKey] = history
+                                    historyKey = session.historyKey
                                 }
                                 return ProjectSnapshot.PaneSnapshot(
                                     content: Self.contentSnapshot(pane.content),
@@ -978,6 +999,7 @@ final class TerminalManager: nonisolated ObservableObject {
             project.normalizeTabOrder()
             guard !project.tabs.isEmpty else {
                 projectObservations[project.id] = nil
+                projectSnapshotObservations[project.id] = nil
                 continue
             }
             if let index = saved.selectedTabIndex, project.tabs.indices.contains(index) {

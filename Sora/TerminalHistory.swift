@@ -391,9 +391,13 @@ enum TerminalHistorySerializer {
 /// string that the session layout snapshot (in `UserDefaults`) references. Kept
 /// out of the snapshot itself so `UserDefaults` never holds large blobs.
 ///
-/// Each save rewrites the whole file from the live set of sessions, so keys
-/// belonging to sessions that no longer exist are pruned automatically.
+/// Changed saves rewrite the whole file from the live set of sessions, so keys
+/// belonging to sessions that no longer exist are pruned automatically. An
+/// unchanged live set is kept in memory and does not touch the sidecar.
+@MainActor
 enum TerminalHistoryStore {
+    private static var lastSavedHistories: [String: String]?
+
     /// Debug builds keep their state under `sora-dev`, matching `AppSettings`
     /// and the separate debug bundle id, so a dev build never clobbers
     /// an installed production build's history.
@@ -412,26 +416,43 @@ enum TerminalHistoryStore {
     }()
 
     static func save(_ histories: [String: String]) {
+        guard histories != lastSavedHistories else { return }
+
         // Nothing to persist: remove the file so a later restore finds nothing
         // rather than replaying stale output.
         guard !histories.isEmpty else {
-            try? FileManager.default.removeItem(at: fileURL)
+            do {
+                if FileManager.default.fileExists(atPath: fileURL.path) {
+                    try FileManager.default.removeItem(at: fileURL)
+                }
+                lastSavedHistories = histories
+            } catch {
+                NSLog("sora: failed to remove \(fileURL.path): \(error)")
+            }
             return
         }
-        guard let data = try? JSONEncoder().encode(histories) else { return }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(histories) else { return }
         do {
             try FileManager.default.createDirectory(
                 at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try data.write(to: fileURL, options: .atomic)
+            lastSavedHistories = histories
         } catch {
             NSLog("sora: failed to write \(fileURL.path): \(error)")
         }
     }
 
     static func load() -> [String: String] {
-        guard let data = try? Data(contentsOf: fileURL),
-              let histories = try? JSONDecoder().decode([String: String].self, from: data)
-        else { return [:] }
+        guard let data = try? Data(contentsOf: fileURL) else {
+            lastSavedHistories = [:]
+            return [:]
+        }
+        guard let histories = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return [:]
+        }
+        lastSavedHistories = histories
         return histories
     }
 }

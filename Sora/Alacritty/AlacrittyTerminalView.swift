@@ -29,6 +29,10 @@ final class AlacrittyTerminalView: NSView, TerminalBackendSurface, NSUserInterfa
     /// the same whichever backend drew it.
     private static let padding = CGPoint(x: 10, y: 8)
     private static let scrollbackLines = 10_000
+    /// Avoid tearing down and rebuilding the same GPU state during key-repeat
+    /// Space navigation; a settled parked surface still releases it promptly.
+    private static let parkedResourceReleaseDelay: DispatchTimeInterval =
+        .milliseconds(200)
 
     private var handle: OpaquePointer?
     private let token = AlacrittyRegistry.shared.nextToken()
@@ -211,10 +215,9 @@ final class AlacrittyTerminalView: NSView, TerminalBackendSurface, NSUserInterfa
             }
             isAwaitingVisibleFrame = true
             setPresentationCoverVisible(true)
-            needsUnconditionalRedraw = true
-            if !renderFrame(waitUntilCompleted: true) {
-                scheduleRender(force: true)
-            }
+            // The cover stays up until the drawable's presented callback, so
+            // there is no reason to stall AppKit waiting for the GPU here.
+            scheduleRender(force: true)
         } else {
             freezeVisibleFrame()
         }
@@ -360,6 +363,9 @@ final class AlacrittyTerminalView: NSView, TerminalBackendSurface, NSUserInterfa
         isCommandPressed = false
         stopModifierMonitor()
         updateHoveredURL(nil)
+        // Invalidate any delayed parking release before tearing down now.
+        presentationGeneration &+= 1
+        releaseParkedResources(generation: presentationGeneration)
         guard let handle else { return }
         self.handle = nil
         sora_alacritty_free(handle)
@@ -383,31 +389,43 @@ final class AlacrittyTerminalView: NSView, TerminalBackendSurface, NSUserInterfa
             isPointerInside = false
             stopModifierMonitor()
             updateHoveredURL(nil)
-            // Drop the glyph atlas and row/instance buffers while parked,
-            // matching Ghostty's occluded-surface GPU memory behavior.
-            metalRenderer = nil
-            // CAMetalLayer retains its current display drawable even after
-            // `device` becomes nil. Replace the layer entirely so Core
-            // Animation releases that drawable and its pool. A 1800×1600
-            // BGRA drawable is ~11.5 MiB, so one per parked tab dominates
-            // multi-tab memory.
-            presentationCoverLayer.removeFromSuperlayer()
-            let parkedLayer = CALayer()
-            parkedLayer.isOpaque = true
-            parkedLayer.backgroundColor = Theme.background.cgColor
-            parkedLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-            replaceBackingLayer(with: parkedLayer)
-            lastPresentedSize = nil
-            lastPresentedScale = nil
-            lastPresentedSurface = nil
-            isAwaitingVisibleFrame = true
             cursorTimer?.invalidate()
             cursorTimer = nil
             cursorBlinking = false
             cursorVisible = true
             directoryTimer?.invalidate()
             directoryTimer = nil
+
+            // Space key repeat often reparents this same surface back into a
+            // pane immediately. Keep its existing GPU state briefly so that
+            // bounce does not destroy and recreate pane-sized allocations.
+            let generation = presentationGeneration
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Self.parkedResourceReleaseDelay
+            ) { [weak self] in
+                self?.releaseParkedResources(generation: generation)
+            }
         }
+    }
+
+    private func releaseParkedResources(generation: UInt64) {
+        guard !isSurfaceVisible, generation == presentationGeneration else { return }
+        // Drop the glyph atlas and row/instance buffers while parked,
+        // matching Ghostty's occluded-surface GPU memory behavior.
+        metalRenderer = nil
+        // CAMetalLayer retains its current display drawable even after
+        // `device` becomes nil. Replace the layer entirely so Core Animation
+        // releases that drawable and its pool once navigation settles.
+        presentationCoverLayer.removeFromSuperlayer()
+        let parkedLayer = CALayer()
+        parkedLayer.isOpaque = true
+        parkedLayer.backgroundColor = Theme.background.cgColor
+        parkedLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        replaceBackingLayer(with: parkedLayer)
+        lastPresentedSize = nil
+        lastPresentedScale = nil
+        lastPresentedSurface = nil
+        isAwaitingVisibleFrame = true
     }
 
     func applyAppearance() {
