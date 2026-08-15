@@ -111,30 +111,30 @@ struct SidebarView: View {
                 .frame(minWidth: 4, maxWidth: .infinity)
                 .layoutPriority(-1)
 
-            if manager.agentSessionCount > 0, let state = manager.agentState {
+            if manager.runningAgentCount > 0 {
                 Button {
                     manager.showAgentsInCommandPalette()
                 } label: {
                     HStack(spacing: 3) {
-                        Image(systemName: state.systemImage)
-                        Text("\(manager.agentSessionCount)")
+                        Image(systemName: AgentDisplayState.working.systemImage)
+                        Text("\(manager.runningAgentCount)")
                             .monospacedDigit()
                     }
                     .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(state.color)
+                    .foregroundStyle(AgentDisplayState.working.color)
                     .padding(.horizontal, 5)
                     .frame(height: 22)
                     .contentShape(RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.plain)
-                .help("Show agents across Spaces")
-                .accessibilityLabel("\(manager.agentSessionCount) open agent sessions across Spaces")
+                .help("Show running agents across Spaces")
+                .accessibilityLabel("\(manager.runningAgentCount) running agents across Spaces")
             }
 
             Button {
                 manager.presentSpaceCreator()
             } label: {
-                Image(systemName: "square.grid.2x2")
+                Image(systemName: "plus")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                     .frame(width: 22, height: 22)
@@ -587,14 +587,6 @@ private struct SidebarTabRow: View {
                         .foregroundStyle(.tertiary)
                 }
 
-                if let agentKind, let agentState {
-                    Image(systemName: agentState.systemImage)
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(agentState.color)
-                        .help("\(agentKind.displayName) · \(agentState.label)")
-                        .accessibilityLabel("\(agentKind.displayName) agent, \(agentState.label)")
-                }
-
                 if isHovering {
                     Button(action: close) {
                         Image(systemName: "xmark")
@@ -645,8 +637,10 @@ private struct SidebarTabIcon: View {
     @ViewBuilder
     var body: some View {
         Group {
-            if agentKind != nil {
-                Image(systemName: "sparkles")
+            if let agentKind, let agentState {
+                Image(systemName: agentState.systemImage)
+                    .help("\(agentKind.displayName) · \(agentState.label)")
+                    .accessibilityLabel("\(agentKind.displayName) agent, \(agentState.label)")
             } else if case .browser(let browser)? = tab.focusedContent {
                 BrowserFaviconView(browser: browser, size: 14)
             } else {

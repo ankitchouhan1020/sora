@@ -114,6 +114,8 @@ enum AgentDisplayState: Equatable {
         }
     }
 
+    var isRunning: Bool { self == .working }
+
     var priority: Int {
         switch self {
         case .blocked: return 5

@@ -29,6 +29,12 @@ let commandActivity = TerminalActivity.classify(
 assert(commandActivity == .command)
 assert(commandActivity.agentKind == nil)
 
+assert(AgentDisplayState.working.isRunning)
+assert(!AgentDisplayState.blocked.isRunning)
+assert(!AgentDisplayState.done.isRunning)
+assert(!AgentDisplayState.idle.isRunning)
+assert(!AgentDisplayState.unknown.isRunning)
+
 var agentState = AgentStateTracker()
 assert(agentState.displayState == .unknown)
 agentState.report(.working, isVisible: false)

@@ -745,7 +745,9 @@ private struct SessionTabLabel: View {
 
     var body: some View {
         TabItemChrome(
-            systemImage: "terminal.fill",
+            systemImage: session.activity.agentKind == nil
+                ? "terminal.fill"
+                : (session.agentState ?? .unknown).systemImage,
             title: customTitle ?? session.title,
             paneCount: paneCount,
             isSelected: isSelected,

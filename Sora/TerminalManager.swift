@@ -184,12 +184,10 @@ final class TerminalManager: nonisolated ObservableObject {
         selectedProject?.selectedSession
     }
 
-    var agentSessionCount: Int {
-        projects.reduce(0) { $0 + $1.agentSessions.count }
-    }
-
-    var agentState: AgentDisplayState? {
-        projects.compactMap(\.agentState).max { $0.priority < $1.priority }
+    var runningAgentCount: Int {
+        projects.reduce(0) { count, project in
+            count + project.agentSessions.count { $0.agentState?.isRunning == true }
+        }
     }
 
     func isViewing(_ session: TerminalSession, in project: Project) -> Bool {
