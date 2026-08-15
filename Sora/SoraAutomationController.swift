@@ -107,6 +107,18 @@ enum SoraAutomationController {
             let (_, project, session) = try findTerminal(id: id)
             project.closeContent(.session(session))
             return .acknowledged
+        case .reportAgentState(let terminalID, let state):
+            let (manager, project, session) = try findTerminal(id: terminalID)
+            let lifecycle: AgentLifecycleState = switch state {
+            case .working: .working
+            case .blocked: .blocked
+            case .idle: .idle
+            }
+            session.reportAgentState(
+                lifecycle,
+                isVisible: manager.isViewing(session, in: project)
+            )
+            return .acknowledged
         }
     }
 

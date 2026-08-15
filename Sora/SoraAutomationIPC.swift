@@ -132,7 +132,8 @@ final class SoraAutomationIPC {
         }
 
         let response = DispatchQueue.main.sync {
-            AppSettings.shared.allowLocalAutomation
+            let isAgentReport = if case .reportAgentState = request { true } else { false }
+            return AppSettings.shared.allowLocalAutomation || isAgentReport
                 ? SoraAutomationController.handle(request)
                 : .failure(.init(code: .automationDisabled, message: "Local automation is disabled"))
         }

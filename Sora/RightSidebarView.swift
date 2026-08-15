@@ -1986,25 +1986,29 @@ private struct InfoPanel: View {
     // MARK: Header
 
     private var header: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "info.circle")
-                .sidebarFont(size: 11, weight: .medium)
-                .foregroundStyle(Color(nsColor: Theme.accent))
-            PanelHeader(
-                title: model.shellName.isEmpty ? "Session" : model.shellName,
-                subtitle: model.shellPid > 0 ? "pid \(String(model.shellPid))" : nil
-            )
-            Button {
-                model.refresh()
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .sidebarFont(size: 10, weight: .medium)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 18, height: 18)
-                    .contentShape(RoundedRectangle(cornerRadius: 4))
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Image(systemName: "info.circle")
+                    .sidebarFont(size: 11, weight: .medium)
+                    .foregroundStyle(Color(nsColor: Theme.accent))
+                PanelHeader(
+                    title: model.shellName.isEmpty ? "Session" : model.shellName,
+                    subtitle: model.shellPid > 0 ? "pid \(String(model.shellPid))" : nil
+                )
+                Button {
+                    model.refresh()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .sidebarFont(size: 10, weight: .medium)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18, height: 18)
+                        .contentShape(RoundedRectangle(cornerRadius: 4))
+                }
+                .buttonStyle(.plain)
+                .help("Refresh")
             }
-            .buttonStyle(.plain)
-            .help("Refresh")
+
+            if let session { AgentInfoStatus(session: session) }
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
@@ -2175,6 +2179,27 @@ private struct InfoPanel: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
+    }
+}
+
+private struct AgentInfoStatus: View {
+    @ObservedObject var session: TerminalSession
+
+    var body: some View {
+        if let kind = session.activity.agentKind,
+           let state = session.agentState {
+            HStack(spacing: 6) {
+                Image(systemName: state.systemImage)
+                    .foregroundStyle(state.color)
+                Text("\(kind.displayName) · \(state.label)")
+                    .sidebarFont(size: 10.5, weight: .medium)
+                Spacer()
+                Text(session.hasAgentLifecycleReport ? "Integration" : "Process detection")
+                    .sidebarFont(size: 9.5)
+                    .foregroundStyle(.tertiary)
+            }
+            .accessibilityElement(children: .combine)
+        }
     }
 }
 

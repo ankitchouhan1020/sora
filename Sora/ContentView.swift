@@ -277,7 +277,10 @@ private struct MainHeaderView: View {
             return URL(fileURLWithPath: diff.repoRoot).lastPathComponent
         case .browser(let browser):
             return URL(string: browser.urlString)?.host
-        case .session:
+        case .session(let session):
+            if let kind = session.activity.agentKind {
+                return "\(kind.displayName) · \((session.agentState ?? .unknown).label)"
+            }
             return project.selectedSession?.currentDirectoryPath
         }
     }

@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unrelease]
 
+- See working, blocked, completed, idle, and unknown coding-agent states across Spaces, and jump directly to agents from Search.
+
 ## [0.3.0]
 
 - Organize work in Spaces with vertical pinned and temporary tabs, attached repositories, custom icons, and trackpad switching.

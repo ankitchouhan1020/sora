@@ -32,6 +32,13 @@ nonisolated enum SoraAutomationRequest: Codable, Equatable {
     case sendInput(terminalID: UUID, text: String, submit: Bool)
     case readOutput(terminalID: UUID, lines: Int)
     case closeTerminal(id: UUID)
+    case reportAgentState(terminalID: UUID, state: SoraAgentReportState)
+}
+
+nonisolated enum SoraAgentReportState: String, Codable, Equatable {
+    case working
+    case blocked
+    case idle
 }
 
 nonisolated struct SoraSpaceReference: Codable, Equatable {

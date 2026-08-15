@@ -18,12 +18,13 @@ import Foundation
 /// ``TerminalBackendEvents``, and names no emulator's types itself.
 @MainActor
 final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated Identifiable {
-    nonisolated let id = UUID()
+    nonisolated let id: UUID
 
     @Published var title: String
     @Published var workingDirectory: String?
     @Published var hasExited = false
     @Published private(set) var activity: TerminalActivity = .terminal
+    @Published private(set) var agentState: AgentDisplayState?
     /// Live cwd of a foreground job such as an agent that moved to a worktree.
     @Published private(set) var foregroundDirectoryPath: String?
     @Published private(set) var commandLifecycle = TerminalCommandLifecycle()
@@ -49,6 +50,7 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
     private var commandFlushTask: Task<Void, Never>?
     private var activityMonitorTask: Task<Void, Never>?
     private var activityTracker = TerminalActivityTracker()
+    private var agentStateTracker = AgentStateTracker()
     private var isTerminating = false
     private var commandExecutionStartedAtNanos: UInt64?
 
@@ -58,6 +60,8 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
         commandArguments: [String]? = nil,
         environmentPath: String? = nil
     ) {
+        let id = UUID()
+        self.id = id
         let directCommand = commandArguments.flatMap { $0.isEmpty ? nil : $0 }
         let shellPath = directCommand?.first ?? Self.loginShell()
         let directory = Self.validWorkingDirectory(initialDirectory)
@@ -75,7 +79,7 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
             arguments: ["-c", script],
             commandLine: "/bin/sh -c \(Self.shellQuote(script))",
             workingDirectory: directory,
-            environment: Self.surfaceEnvironment(pathOverride: environmentPath)
+            environment: Self.surfaceEnvironment(pathOverride: environmentPath, terminalID: id)
         )
 
         self.shellPath = shellPath
@@ -223,11 +227,31 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
                     )
                     if let activity = self.activityTracker.observe(observed) {
                         self.activity = activity
+                        if activity.agentKind == nil {
+                            self.agentStateTracker.reset()
+                            self.agentState = nil
+                        } else {
+                            self.agentState = self.agentStateTracker.displayState
+                        }
                     }
                 }
                 try? await Task.sleep(for: .milliseconds(500))
             }
         }
+    }
+
+    func reportAgentState(_ state: AgentLifecycleState, isVisible: Bool) {
+        agentStateTracker.report(state, isVisible: isVisible)
+        if activity.agentKind != nil { agentState = agentStateTracker.displayState }
+    }
+
+    func markAgentSeen() {
+        agentStateTracker.markSeen()
+        if activity.agentKind != nil { agentState = agentStateTracker.displayState }
+    }
+
+    var hasAgentLifecycleReport: Bool {
+        agentStateTracker.lifecycle != nil
     }
 
     /// Short label for the sidebar: the tail of the current directory, if known.
@@ -334,11 +358,17 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
 
     // MARK: - Launch
 
-    private static func surfaceEnvironment(pathOverride: String?) -> [String: String] {
+    private static func surfaceEnvironment(
+        pathOverride: String?, terminalID: UUID
+    ) -> [String: String] {
         var environment = [
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",
         ]
+        environment["SORA_TERMINAL_ID"] = terminalID.uuidString
+        if let helpers = bundledHelpersPath() {
+            environment["SORA_BIN_PATH"] = (helpers as NSString).appendingPathComponent("sora")
+        }
         if let pathOverride, !pathOverride.isEmpty {
             environment["PATH"] = pathOverride
         } else if let helpers = bundledHelpersPath() {

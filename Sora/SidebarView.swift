@@ -111,6 +111,26 @@ struct SidebarView: View {
                 .frame(minWidth: 4, maxWidth: .infinity)
                 .layoutPriority(-1)
 
+            if manager.agentSessionCount > 0, let state = manager.agentState {
+                Button {
+                    manager.showAgentsInCommandPalette()
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: state.systemImage)
+                        Text("\(manager.agentSessionCount)")
+                            .monospacedDigit()
+                    }
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(state.color)
+                    .padding(.horizontal, 5)
+                    .frame(height: 22)
+                    .contentShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .help("Show agents across Spaces")
+                .accessibilityLabel("\(manager.agentSessionCount) open agent sessions across Spaces")
+            }
+
             Button {
                 manager.presentSpaceCreator()
             } label: {
@@ -213,8 +233,12 @@ struct SidebarView: View {
         project: Project,
         isPinned: Bool
     ) -> some View {
-        SidebarTabRow(
+        let agentKind = tab.sessions.compactMap { $0.activity.agentKind }.first
+        let agentState = tab.sessions.compactMap(\.agentState).max { $0.priority < $1.priority }
+        return SidebarTabRow(
             tab: tab,
+            agentKind: agentKind,
+            agentState: agentState,
             isSelected: project.selectedTabID == tab.id,
             fontSize: settings.sidebarFontSize,
             select: { project.selectedTabID = tab.id },
@@ -264,6 +288,8 @@ struct SidebarView: View {
                 HStack(spacing: 0) {
                     ForEach(Array(manager.projects.enumerated()), id: \.element.id) { index, project in
                         let isSelected = project.id == manager.selectedProjectID
+                        let agentCount = project.agentSessions.count
+                        let agentState = project.agentState
                         Button {
                             manager.selectedProjectID = project.id
                         } label: {
@@ -279,11 +305,18 @@ struct SidebarView: View {
                                 }
                             }
                             .frame(width: project.customIcon == nil ? 14 : 18, height: 18)
+                            .overlay {
+                                if let agentState {
+                                    Circle()
+                                        .stroke(agentState.color, lineWidth: 1.5)
+                                        .frame(width: 14, height: 14)
+                                }
+                            }
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help("\(project.name) (⌘\(min(index + 1, 9)))")
-                        .accessibilityLabel("Space: \(project.name)")
+                        .help(spaceHelp(project, index: index, agentCount: agentCount))
+                        .accessibilityLabel(spaceAccessibilityLabel(project, agentCount: agentCount))
                         .accessibilityAddTraits(isSelected ? .isSelected : [])
                         .contextMenu { spaceActions(for: project) }
                     }
@@ -292,6 +325,17 @@ struct SidebarView: View {
             }
         }
         .frame(height: 18)
+    }
+
+    private func spaceHelp(_ project: Project, index: Int, agentCount: Int) -> String {
+        let shortcut = "⌘\(min(index + 1, 9))"
+        guard agentCount > 0 else { return "\(project.name) (\(shortcut))" }
+        return "\(project.name) · \(agentCount) agent \(agentCount == 1 ? "session" : "sessions") open (\(shortcut))"
+    }
+
+    private func spaceAccessibilityLabel(_ project: Project, agentCount: Int) -> String {
+        guard agentCount > 0 else { return "Space: \(project.name)" }
+        return "Space: \(project.name), \(agentCount) open agent \(agentCount == 1 ? "session" : "sessions")"
     }
 
     private var footer: some View {
@@ -498,6 +542,8 @@ struct SidebarView: View {
 private struct SidebarTabRow: View {
     @ObservedObject var tab: PaneTab
     @ObservedObject private var themeChanges = Theme.changes
+    let agentKind: AgentKind?
+    let agentState: AgentDisplayState?
     let isSelected: Bool
     let fontSize: Double
     let select: () -> Void
@@ -522,7 +568,10 @@ private struct SidebarTabRow: View {
     var body: some View {
         Button(action: select) {
             HStack(spacing: 8) {
-                SidebarTabIcon(tab: tab, isSelected: isSelected)
+                SidebarTabIcon(
+                    tab: tab, agentKind: agentKind,
+                    agentState: agentState, isSelected: isSelected
+                )
 
                 Text(displayTitle)
                     .font(.system(size: fontSize))
@@ -536,6 +585,14 @@ private struct SidebarTabRow: View {
                         .font(.system(size: 9, weight: .semibold))
                         .monospacedDigit()
                         .foregroundStyle(.tertiary)
+                }
+
+                if let agentKind, let agentState {
+                    Image(systemName: agentState.systemImage)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(agentState.color)
+                        .help("\(agentKind.displayName) · \(agentState.label)")
+                        .accessibilityLabel("\(agentKind.displayName) agent, \(agentState.label)")
                 }
 
                 if isHovering {
@@ -576,15 +633,19 @@ private struct SidebarTabRow: View {
 
 private struct SidebarTabIcon: View {
     @ObservedObject var tab: PaneTab
+    let agentKind: AgentKind?
+    let agentState: AgentDisplayState?
     let isSelected: Bool
+
+    private var foregroundStyle: AnyShapeStyle {
+        if let agentState { return AnyShapeStyle(agentState.color) }
+        return isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary)
+    }
 
     @ViewBuilder
     var body: some View {
         Group {
-            if tab.sessions.contains(where: {
-                if case .agent = $0.activity { return true }
-                return false
-            }) {
+            if agentKind != nil {
                 Image(systemName: "sparkles")
             } else if case .browser(let browser)? = tab.focusedContent {
                 BrowserFaviconView(browser: browser, size: 14)
@@ -593,12 +654,19 @@ private struct SidebarTabIcon: View {
             }
         }
         .font(.system(size: 10.5, weight: .medium))
-        .foregroundStyle(
-            isSelected
-                ? AnyShapeStyle(.primary)
-                : AnyShapeStyle(.secondary)
-        )
+        .foregroundStyle(foregroundStyle)
         .frame(width: 14, height: 14)
+    }
+}
+
+extension AgentDisplayState {
+    var color: Color {
+        switch self {
+        case .blocked: return .orange
+        case .working: return .green
+        case .done: return .teal
+        case .idle, .unknown: return .secondary
+        }
     }
 }
 

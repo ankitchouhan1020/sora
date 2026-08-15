@@ -180,6 +180,8 @@ private enum SoraCLI {
             print("Sora is running; local automation enabled; \(spaces.count) Space(s)")
         case "space":
             try runSpaceCommand(Array(arguments.dropFirst()), client: client)
+        case "agent":
+            try runAgentCommand(Array(arguments.dropFirst()), client: client)
         case "project":
             guard arguments == ["project", "list"] else {
                 throw CLIError.usage("Usage: sora project list")
@@ -283,6 +285,35 @@ private enum SoraCLI {
         }
     }
 
+    private static func runAgentCommand(
+        _ arguments: [String], client: SoraClient
+    ) throws {
+        switch arguments.first {
+        case "install" where arguments == ["install", "pi"]:
+            let base = ProcessInfo.processInfo.environment["PI_CODING_AGENT_DIR"]
+                .map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent(".pi/agent", isDirectory: true)
+            let directory = base.appendingPathComponent("extensions", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let file = directory.appendingPathComponent("sora-agent-state.ts")
+            try Data(piAgentExtension.utf8).write(to: file, options: .atomic)
+            print("Installed Pi integration at \(file.path)")
+        case "state":
+            guard arguments.count == 2,
+                  let state = SoraAgentReportState(rawValue: arguments[1]),
+                  let value = ProcessInfo.processInfo.environment["SORA_TERMINAL_ID"],
+                  let terminalID = UUID(uuidString: value)
+            else { throw CLIError.usage("Usage: sora agent state <working|blocked|idle>") }
+            guard case .acknowledged = try client.send(
+                .reportAgentState(terminalID: terminalID, state: state),
+                launchIfNeeded: false
+            ) else { throw CLIError.transport("Unexpected response") }
+        default:
+            throw CLIError.usage("Usage: sora agent install pi")
+        }
+    }
+
     private static func parseRun(
         _ arguments: [String]
     ) throws -> (space: SoraSpaceReference, name: String?, command: String) {
@@ -315,6 +346,44 @@ private enum SoraCLI {
         "'" + argument.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    private static let piAgentExtension = #"""
+    // installed by Sora; reinstalling updates this file.
+    import { execFile } from "node:child_process";
+    import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+    const bin = process.env.SORA_BIN_PATH;
+    const terminalID = process.env.SORA_TERMINAL_ID;
+    const enabled = () => !!bin && !!terminalID;
+    const report = (state: "working" | "blocked" | "idle") => {
+      if (!enabled()) return;
+      execFile(bin!, ["agent", "state", state], { timeout: 2000 }, () => {});
+    };
+
+    export default function (pi: ExtensionAPI) {
+      let active = false;
+      let blocked = 0;
+      const publish = () => report(blocked > 0 ? "blocked" : active ? "working" : "idle");
+
+      pi.events.on("herdr:blocked", (event: any) => {
+        blocked = Math.max(0, blocked + (event?.active ? 1 : -1));
+        publish();
+      });
+      pi.events.on("sora:blocked", (event: any) => {
+        blocked = Math.max(0, blocked + (event?.active ? 1 : -1));
+        publish();
+      });
+      pi.on("session_start", (_event, ctx) => {
+        if (ctx.mode !== "tui") return;
+        active = !ctx.isIdle();
+        publish();
+      });
+      pi.on("agent_start", () => { active = true; publish(); });
+      pi.on("agent_settled", (_event, ctx) => {
+        if (ctx.isIdle()) { active = false; publish(); }
+      });
+    }
+    """#
+
     private static let runUsage = "sora run --space <id-or-path> [--name <name>] -- <command> [arguments…]"
     private static let spaceUsage = """
     Usage:
@@ -333,6 +402,7 @@ private enum SoraCLI {
       sora space select <id>
       sora space rename <id> <name>
       sora space remove <id> --force
+      sora agent install pi
       sora open <path>
       sora send <terminal-id> <text> [--submit]
       sora output <terminal-id> [--lines <count>]

@@ -38,7 +38,11 @@ final class TerminalManager: nonisolated ObservableObject {
     nonisolated let id = UUID()
 
     @Published var projects: [Project] = []
-    @Published var selectedProjectID: UUID?
+    @Published var selectedProjectID: UUID? {
+        didSet {
+            if selectedProjectID != oldValue { selectedProject?.markSelectedAgentsSeen() }
+        }
+    }
     @Published var isPanelVisible = false
     @Published var panelTab: RightPanel = .files
     /// Visibility of the left Spaces sidebar (⌘B). `isPanelVisible` above is
@@ -46,6 +50,7 @@ final class TerminalManager: nonisolated ObservableObject {
     @Published var isLeftSidebarVisible = true
     @Published var isSpaceCreatorPresented = false
     @Published private(set) var isCommandPaletteVisible = false
+    @Published private(set) var commandPaletteInitialQuery = ""
 
     /// Projects publish their own changes (session list, session selection);
     /// re-publish them so views observing the manager stay current.
@@ -54,6 +59,7 @@ final class TerminalManager: nonisolated ObservableObject {
     private var settingsObservation: AnyCancellable?
     private var autosaveObservation: AnyCancellable?
     private var terminationObservation: AnyCancellable?
+    private var activationObservation: AnyCancellable?
     /// The stable terminal/editor responder displaced by the command palette's
     /// search field. AppKit field editors are deliberately excluded because a
     /// SwiftUI TextField can reuse the same responder for the palette itself.
@@ -163,6 +169,11 @@ final class TerminalManager: nonisolated ObservableObject {
                 TerminalManager.isQuitting = true
                 TerminalManager.saveAll(captureTerminalHistory: true)
             }
+        activationObservation = NotificationCenter.default
+            .publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                self?.selectedProject?.markSelectedAgentsSeen()
+            }
     }
 
     var selectedProject: Project? {
@@ -171,6 +182,21 @@ final class TerminalManager: nonisolated ObservableObject {
 
     var selectedSession: TerminalSession? {
         selectedProject?.selectedSession
+    }
+
+    var agentSessionCount: Int {
+        projects.reduce(0) { $0 + $1.agentSessions.count }
+    }
+
+    var agentState: AgentDisplayState? {
+        projects.compactMap(\.agentState).max { $0.priority < $1.priority }
+    }
+
+    func isViewing(_ session: TerminalSession, in project: Project) -> Bool {
+        window?.isKeyWindow == true
+            && NSApp.isActive
+            && selectedProjectID == project.id
+            && project.selectedTab?.sessions.contains { $0 === session } == true
     }
 
     // MARK: - Projects
@@ -712,15 +738,24 @@ final class TerminalManager: nonisolated ObservableObject {
         if isCommandPaletteVisible {
             dismissCommandPalette()
         } else {
-            commandPaletteWindow = NSApp.keyWindow
-            if let responder = commandPaletteWindow?.firstResponder,
-               isStableWorkspaceResponder(responder) {
-                commandPalettePreviousResponder = responder
-            } else {
-                commandPalettePreviousResponder = nil
-            }
-            isCommandPaletteVisible = true
+            presentCommandPalette()
         }
+    }
+
+    func showAgentsInCommandPalette() {
+        presentCommandPalette(query: "agent")
+    }
+
+    private func presentCommandPalette(query: String = "") {
+        commandPaletteInitialQuery = query
+        commandPaletteWindow = NSApp.keyWindow
+        if let responder = commandPaletteWindow?.firstResponder,
+           isStableWorkspaceResponder(responder) {
+            commandPalettePreviousResponder = responder
+        } else {
+            commandPalettePreviousResponder = nil
+        }
+        isCommandPaletteVisible = true
     }
 
     func dismissCommandPalette() {

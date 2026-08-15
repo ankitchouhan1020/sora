@@ -36,6 +36,7 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
             guard selectedTabID != oldValue, let selectedTabID else { return }
             recentTabIDs.removeAll { $0 == selectedTabID }
             recentTabIDs.insert(selectedTabID, at: 0)
+            markSelectedAgentsSeen()
         }
     }
 
@@ -71,6 +72,20 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
     /// Every terminal session across every pane in every tab.
     var sessions: [TerminalSession] {
         tabs.flatMap(\.sessions)
+    }
+
+    /// Live agent processes in this Space. Process detection proves presence,
+    /// not whether an agent is working, blocked, or finished.
+    var agentSessions: [TerminalSession] {
+        sessions.filter { $0.activity.agentKind != nil }
+    }
+
+    var agentState: AgentDisplayState? {
+        agentSessions.compactMap(\.agentState).max { $0.priority < $1.priority }
+    }
+
+    func markSelectedAgentsSeen() {
+        selectedTab?.sessions.forEach { $0.markAgentSeen() }
     }
 
     var selectedTab: PaneTab? {
@@ -209,7 +224,11 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
             self?.closeContent(.session(session), terminate: false)
         }
         sessionObservations[session.id] = session.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
+            // @Published emits before the session property changes. Forward on
+            // the next turn so parent views read the new activity/title/path.
+            DispatchQueue.main.async { [weak self] in
+                self?.objectWillChange.send()
+            }
         }
         return session
     }

@@ -18,6 +18,21 @@ nonisolated enum AgentKind: String {
     case kimi
     case amp
 
+    var displayName: String {
+        switch self {
+        case .claude: return "Claude"
+        case .codex: return "Codex"
+        case .gemini: return "Gemini"
+        case .grok: return "Grok"
+        case .pi: return "Pi"
+        case .cursorAgent: return "Cursor"
+        case .openCode: return "OpenCode"
+        case .copilot: return "Copilot"
+        case .kimi: return "Kimi"
+        case .amp: return "Amp"
+        }
+    }
+
     private static let aliases: [String: Self] = [
         "claude": .claude,
         "codex": .codex,
@@ -66,16 +81,100 @@ nonisolated enum AgentKind: String {
     }
 }
 
+enum AgentLifecycleState: Equatable {
+    case working
+    case blocked
+    case idle
+}
+
+enum AgentDisplayState: Equatable {
+    case blocked
+    case working
+    case done
+    case idle
+    case unknown
+
+    var label: String {
+        switch self {
+        case .blocked: return "Needs Input"
+        case .working: return "Working"
+        case .done: return "Done"
+        case .idle: return "Idle"
+        case .unknown: return "Unknown"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .blocked: return "exclamationmark.circle.fill"
+        case .working: return "circle.lefthalf.filled"
+        case .done: return "checkmark.circle.fill"
+        case .idle: return "circle"
+        case .unknown: return "questionmark.circle"
+        }
+    }
+
+    var priority: Int {
+        switch self {
+        case .blocked: return 5
+        case .done: return 4
+        case .working: return 3
+        case .unknown: return 2
+        case .idle: return 1
+        }
+    }
+}
+
+struct AgentStateTracker {
+    private(set) var lifecycle: AgentLifecycleState?
+    private(set) var completionUnseen = false
+
+    var displayState: AgentDisplayState {
+        switch lifecycle {
+        case .blocked: return .blocked
+        case .working: return .working
+        case .idle: return completionUnseen ? .done : .idle
+        case nil: return .unknown
+        }
+    }
+
+    mutating func report(_ state: AgentLifecycleState, isVisible: Bool) {
+        if state == .idle,
+           lifecycle == .working || lifecycle == .blocked,
+           !isVisible {
+            completionUnseen = true
+        } else if state != .idle || isVisible {
+            completionUnseen = false
+        }
+        lifecycle = state
+    }
+
+    mutating func markSeen() {
+        if lifecycle == .idle { completionUnseen = false }
+    }
+
+    mutating func reset() {
+        lifecycle = nil
+        completionUnseen = false
+    }
+}
+
 enum TerminalActivity: Equatable {
     case agent(AgentKind)
     case command
     case terminal
+
+    var agentKind: AgentKind? {
+        if case .agent(let kind) = self { return kind }
+        return nil
+    }
 
     static func classify(
         shellPID: pid_t,
         foregroundPID: pid_t?,
         snapshot: TerminalProcessSnapshot?
     ) -> Self {
+        let foregroundPID = foregroundPID ?? snapshot?.processGroupID
         guard let foregroundPID, foregroundPID != shellPID else { return .terminal }
         guard snapshot?.processGroupID == foregroundPID else { return .command }
         return snapshot?.agentKind.map(Self.agent) ?? .command

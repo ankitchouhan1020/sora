@@ -9,11 +9,13 @@ import SwiftUI
 /// Groups palette rows under a header — built-in actions vs. open sessions.
 enum PaletteSection: Hashable {
     case command
+    case agent
     case session
 
     var title: String {
         switch self {
         case .command: return "Commands"
+        case .agent: return "Agents"
         case .session: return "Sessions"
         }
     }
@@ -22,7 +24,8 @@ enum PaletteSection: Hashable {
     var order: Int {
         switch self {
         case .command: return 0
-        case .session: return 1
+        case .agent: return 1
+        case .session: return 2
         }
     }
 }
@@ -40,6 +43,7 @@ struct PaletteCommand: Identifiable {
     /// Text the fuzzy filter matches against; defaults to `title`, widened for
     /// sessions to also cover the project name and directory.
     var searchText: String? = nil
+    var agentState: AgentDisplayState? = nil
     let action: () -> Void
 }
 
@@ -207,12 +211,43 @@ struct CommandPaletteView: View {
         return items
     }
 
-    /// Every open terminal session across all projects, as a jump-to entry.
-    /// The directory shows as a subtitle and the project name folds into the
-    /// searchable text, so typing a repo or folder name finds its sessions.
+    /// Open agent processes across every Space. Their rows keep the tab's
+    /// user-owned identity and jump to the existing terminal instead of
+    /// creating a global dashboard or duplicate session.
+    private var agentCommands: [PaletteCommand] {
+        manager.projects.flatMap { project in
+            project.tabs.flatMap { tab in
+                tab.sessions.compactMap { session in
+                    guard let kind = session.activity.agentKind else { return nil }
+                    let state = session.agentState ?? .unknown
+                    let directory = sessionDirectory(session)
+                    let title = tab.customName.flatMap { $0.isEmpty ? nil : $0 }
+                        ?? directory.map { URL(fileURLWithPath: $0).lastPathComponent }
+                        ?? session.title
+                    return PaletteCommand(
+                        id: "agent-\(session.id)",
+                        title: title,
+                        systemImage: state.systemImage,
+                        subtitle: "\(kind.displayName) · \(state.label) · \(project.name)",
+                        section: .agent,
+                        searchText: ["agent", kind.displayName, state.label, title, project.name, directory]
+                            .compactMap { $0 }
+                            .joined(separator: " "),
+                        agentState: state
+                    ) {
+                        manager.revealSession(session)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every ordinary terminal session across all projects, as a jump-to
+    /// entry. Agent terminals live in the dedicated section above.
     private var sessionCommands: [PaletteCommand] {
         manager.projects.flatMap { project in
-            project.sessions.map { session in
+            project.sessions.compactMap { session in
+                guard session.activity.agentKind == nil else { return nil }
                 let directory = sessionDirectory(session)
                 let search = [session.title, project.name, directory]
                     .compactMap { $0 }
@@ -245,8 +280,12 @@ struct CommandPaletteView: View {
 
     private var filtered: [PaletteCommand] {
         let pattern = query.trimmingCharacters(in: .whitespaces)
-        let all = commands + sessionCommands
+        let all = commands + agentCommands + sessionCommands
         guard !pattern.isEmpty else { return all }
+        if pattern.localizedCaseInsensitiveCompare("agent") == .orderedSame
+            || pattern.localizedCaseInsensitiveCompare("agents") == .orderedSame {
+            return agentCommands
+        }
         // Rank by match score within each section, but keep the sections in
         // their fixed order (commands first) so the layout stays stable as the
         // query changes.
@@ -333,7 +372,7 @@ struct CommandPaletteView: View {
         )
         .shadow(color: .black.opacity(0.3), radius: 28, y: 10)
         .onAppear {
-            query = ""
+            query = manager.commandPaletteInitialQuery
             selection = 0
             pointerBaseline = NSEvent.mouseLocation
             // Defer to the next runloop tick: assigning focus synchronously
@@ -362,8 +401,7 @@ struct CommandPaletteView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 24)
         } else {
-            let showHeaders = items.contains { $0.section == .command }
-                && items.contains { $0.section == .session }
+            let showHeaders = Set(items.map(\.section)).count > 1
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 1) {
@@ -408,7 +446,12 @@ struct CommandPaletteView: View {
             HStack(spacing: 9) {
                 Image(systemName: command.systemImage)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(isSelected ? AnyShapeStyle(Color(nsColor: Theme.accent)) : AnyShapeStyle(.secondary))
+                    .foregroundStyle(
+                        command.agentState.map { AnyShapeStyle($0.color) }
+                            ?? (command.section == .agent
+                            ? AnyShapeStyle(Color.secondary)
+                            : (isSelected ? AnyShapeStyle(Color(nsColor: Theme.accent)) : AnyShapeStyle(.secondary)))
+                    )
                     .frame(width: 16)
                 Text(command.title)
                     .font(.system(size: 12.5))

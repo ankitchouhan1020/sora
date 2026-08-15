@@ -23,7 +23,10 @@ sora space select <space-id>
 sora space rename <space-id> "Review auth"
 sora run --space <space-id> -- npm test
 sora space remove <space-id> --force
+sora agent install pi
 ```
+
+The Pi integration reports working, needs-input, and idle lifecycle states to Sora; other detected agents remain Unknown until they have a trusted integration.
 
 The same Space operations are available through `sora mcp`.
 
