@@ -67,7 +67,7 @@ if (!Number.isSafeInteger(HISTORY_COUNT) || HISTORY_COUNT < 0) {
 // A bucket-scoped R2 API token (Object Read & Write) can't create buckets, and
 // rclone otherwise tries to check/create the bucket before uploading. The
 // bucket already exists, so skip that on every call.
-const RCLONE_FLAGS = ["--s3-no-check-bucket"];
+const RCLONE_FLAGS = ["--s3-no-check-bucket", "--contimeout", "10s", "--timeout", "1m"];
 
 // Respect xcode-select unless the caller explicitly sets DEVELOPER_DIR.
 need("xcodebuild");

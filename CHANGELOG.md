@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unrelease]
 
+## [0.5.0]
+
 - Let coding agents coordinate Space-scoped pinned tabs and panes through Sora’s CLI, with readable direct prompts and trusted Pi, OpenCode, and Grok lifecycle reporting.
 - Pin and unpin tabs reliably by dragging them between sidebar sections, even when a section is empty.
 
