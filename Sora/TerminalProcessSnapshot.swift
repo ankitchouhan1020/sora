@@ -236,6 +236,18 @@ nonisolated struct TerminalProcessSnapshot: Equatable {
     private static let maximumProcessCount = 65_536
     private static let maximumArgumentBytes = 1_048_576
 
+    /// A login shell is ready for injected input only once it owns the
+    /// foreground process group alone and is sleeping for terminal input.
+    /// This avoids writing automation commands into shell startup files.
+    static func isShellAwaitingInput(_ shellPID: pid_t) -> Bool {
+        guard let info = bsdInfo(for: shellPID), info.pbi_status == SSLEEP,
+              let snapshot = capture(shellPID: shellPID),
+              snapshot.processGroupID == shellPID,
+              snapshot.members.count == 1,
+              snapshot.members[0].pid == shellPID else { return false }
+        return true
+    }
+
     /// Resolves the shell's foreground process group, then snapshots its
     /// members. Races and inaccessible kernel metadata fail closed.
     static func capture(shellPID: pid_t) -> Self? {

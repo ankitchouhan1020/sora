@@ -144,11 +144,7 @@ const FEATURES: { group: string; rows: Row[] }[] = [
       {
         name: 'Bundled sora command',
         detail:
-          'create, select, rename, and remove Spaces; open visible terminals, send input, and read recent output',
-      },
-      {
-        name: 'MCP for coding agents',
-        detail: 'the same focused controls are available to agents over standard input and output',
+          'coordinate Spaces, pinned or temporary tabs, panes, and agent conversations from one CLI',
       },
       {
         name: 'Visible by design',
@@ -233,7 +229,7 @@ const FAQ: { q: string; a: ReactNode }[] = [
   },
   {
     q: 'Can coding agents control Sora?',
-    a: 'Yes. Use the bundled sora command or its MCP server; local automation can be disabled in Settings. Commands stay visible in normal terminal tabs, and no network port or background daemon is opened.',
+    a: 'Yes. Use the bundled sora command; local automation can be disabled in Settings. Commands stay visible in normal terminal tabs, and no network port or background daemon is opened.',
   },
   {
     q: 'What happens to my sessions when I quit?',

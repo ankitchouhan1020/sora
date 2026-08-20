@@ -173,6 +173,11 @@ private enum SoraCLI {
             print(paneUsage)
             return
         }
+        if command == "tab",
+           arguments.count == 1 || ["help", "--help", "-h"].contains(arguments[1]) {
+            print(tabUsage)
+            return
+        }
         if command == "agent",
            arguments.count == 1 || ["help", "--help", "-h"].contains(arguments[1]) {
             print(agentUsage)
@@ -180,9 +185,6 @@ private enum SoraCLI {
         }
         let client = SoraClient()
         switch command {
-        case "mcp":
-            guard arguments.count == 1 else { throw CLIError.usage("Usage: sora mcp") }
-            try await SoraMCP.run(client: client)
         case "status":
             guard arguments.count == 1 else { throw CLIError.usage("Usage: sora status") }
             let result = try client.send(.listSpaces, launchIfNeeded: false)
@@ -190,6 +192,8 @@ private enum SoraCLI {
             print("Sora is running; local automation enabled; \(spaces.count) Space(s)")
         case "space":
             try runSpaceCommand(Array(arguments.dropFirst()), client: client)
+        case "tab":
+            try runTabCommand(Array(arguments.dropFirst()), client: client)
         case "pane":
             try runPaneCommand(Array(arguments.dropFirst()), client: client)
         case "agent":
@@ -245,13 +249,23 @@ private enum SoraCLI {
     private static func runSpaceCommand(_ arguments: [String], client: SoraClient) throws {
         guard let command = arguments.first else { throw CLIError.usage(spaceUsage) }
         switch command {
+        case "current":
+            guard arguments.count == 1,
+                  case .space(let space) = try client.send(.currentSpace(
+                    callerTerminalID: try callerTerminalID()
+                  )) else { throw CLIError.usage(spaceUsage) }
+            printJSON(space)
+        case "get":
+            guard arguments.count == 2, let id = UUID(uuidString: arguments[1]),
+                  case .spaces(let spaces) = try client.send(.listSpaces),
+                  let space = spaces.first(where: { $0.id == id })
+            else { throw CLIError.usage(spaceUsage) }
+            printJSON(space)
         case "list":
             guard arguments.count == 1,
                   case .spaces(let spaces) = try client.send(.listSpaces)
             else { throw CLIError.usage(spaceUsage) }
-            for space in spaces {
-                print("\(space.id.uuidString)\t\(space.name)\t\(space.icon ?? "")\t\(space.repositories.joined(separator: ","))")
-            }
+            printJSON(spaces)
         case "create":
             var name: String?
             var icon: String?
@@ -273,19 +287,19 @@ private enum SoraCLI {
                     name: name, icon: icon, repositories: repositories
                   ))
             else { throw CLIError.usage(spaceUsage) }
-            print("\(space.id.uuidString)\t\(space.name)")
+            printJSON(space)
         case "select":
             guard arguments.count == 2, let id = UUID(uuidString: arguments[1]),
                   case .space(let space) = try client.send(.selectSpace(id: id))
             else { throw CLIError.usage(spaceUsage) }
-            print("\(space.id.uuidString)\t\(space.name)")
+            printJSON(space)
         case "rename":
             guard arguments.count == 3, let id = UUID(uuidString: arguments[1]),
                   case .space(let space) = try client.send(.renameSpace(
                     id: id, name: arguments[2]
                   ))
             else { throw CLIError.usage(spaceUsage) }
-            print("\(space.id.uuidString)\t\(space.name)")
+            printJSON(space)
         case "remove":
             guard arguments.count == 3, let id = UUID(uuidString: arguments[1]),
                   arguments[2] == "--force"
@@ -297,11 +311,78 @@ private enum SoraCLI {
         }
     }
 
+    private static func runTabCommand(
+        _ arguments: [String], client: SoraClient
+    ) throws {
+        guard let command = arguments.first else { throw CLIError.usage(tabUsage) }
+        let caller = try callerTerminalID()
+        let result: SoraAutomationResult
+        switch command {
+        case "current":
+            guard arguments.count == 1 else { throw CLIError.usage(tabUsage) }
+            result = try client.send(.currentTab(callerTerminalID: caller))
+        case "list":
+            guard arguments.count == 1 else { throw CLIError.usage(tabUsage) }
+            result = try client.send(.listTabs(callerTerminalID: caller))
+        case "get":
+            guard arguments.count == 2, let id = UUID(uuidString: arguments[1]) else {
+                throw CLIError.usage(tabUsage)
+            }
+            result = try client.send(.getTab(callerTerminalID: caller, tabID: id))
+        case "create":
+            var name: String?
+            var directory: String?
+            var pinned: Bool?
+            var focus = false
+            var index = 1
+            while index < arguments.count {
+                switch arguments[index] {
+                case "--name": name = try value(after: &index, in: arguments, option: "--name")
+                case "--cwd": directory = absolutePath(try value(after: &index, in: arguments, option: "--cwd"))
+                case "--pinned": pinned = true
+                case "--temporary": pinned = false
+                case "--focus": focus = true
+                default: throw CLIError.usage(tabUsage)
+                }
+                index += 1
+            }
+            guard let pinned else {
+                throw CLIError.usage("tab create requires --pinned or --temporary")
+            }
+            result = try client.send(.createTerminalTab(
+                callerTerminalID: caller, name: name, directory: directory,
+                pinned: pinned, focus: focus
+            ))
+        case "focus", "pin", "unpin":
+            guard arguments.count == 2, let id = UUID(uuidString: arguments[1]) else {
+                throw CLIError.usage(tabUsage)
+            }
+            result = command == "focus"
+                ? try client.send(.focusTab(callerTerminalID: caller, tabID: id))
+                : try client.send(.setTabPinned(
+                    callerTerminalID: caller, tabID: id, pinned: command == "pin"
+                ))
+        default: throw CLIError.usage(tabUsage)
+        }
+        switch result {
+        case .tab(let tab): printJSON(tab)
+        case .tabs(let tabs): printJSON(tabs)
+        default: throw CLIError.transport("Unexpected response")
+        }
+    }
+
     private static func runPaneCommand(
         _ arguments: [String], client: SoraClient
     ) throws {
         guard let command = arguments.first else { throw CLIError.usage(paneUsage) }
         let caller = try callerTerminalID()
+        if command == "run" {
+            let parsed = try parsePaneRun(Array(arguments.dropFirst()))
+            guard case .acknowledged = try client.send(.runInPane(
+                callerTerminalID: caller, paneID: parsed.paneID, arguments: parsed.arguments
+            )) else { throw CLIError.transport("Unexpected response") }
+            return
+        }
         var paneID: UUID?
         var lines = 100
         var timeout = 30_000
@@ -341,6 +422,9 @@ private enum SoraCLI {
         case "list":
             guard arguments.count == 1 else { throw CLIError.usage(paneUsage) }
             result = try client.send(.listPanes(callerTerminalID: caller))
+        case "get":
+            guard let paneID, options == ["--pane"] else { throw CLIError.usage(paneUsage) }
+            result = try client.send(.getPane(callerTerminalID: caller, paneID: paneID))
         case "split":
             guard options.isSubset(of: [
                 "--current", "--pane", "--cwd", "--left", "--right", "--up", "--top",
@@ -381,16 +465,34 @@ private enum SoraCLI {
         }
 
         switch result {
-        case .pane(let pane): printPane(pane)
-        case .panes(let panes): panes.forEach(printPane)
+        case .pane(let pane): printJSON(pane)
+        case .panes(let panes): printJSON(panes)
         case .output(let output): print(output)
         case .acknowledged: break
         default: throw CLIError.transport("Unexpected response")
         }
     }
 
-    private static func printPane(_ pane: SoraPaneSummary) {
-        print("\(pane.id.uuidString)\t\(pane.content.rawValue)\t\(pane.title)\t\(pane.directory ?? "")")
+    private static func parsePaneRun(
+        _ arguments: [String]
+    ) throws -> (paneID: UUID?, arguments: [String]) {
+        var paneID: UUID?
+        var index = 0
+        while index < arguments.count, arguments[index] != "--" {
+            guard arguments[index] == "--pane" else { throw CLIError.usage(paneUsage) }
+            paneID = try uuidValue(after: &index, in: arguments, option: "--pane")
+            index += 1
+        }
+        guard index < arguments.count, arguments[index] == "--", index + 1 < arguments.count else {
+            throw CLIError.usage(paneUsage)
+        }
+        return (paneID, Array(arguments.dropFirst(index + 1)))
+    }
+
+    private static func printJSON<T: Encodable>(_ value: T) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        print(String(decoding: try! encoder.encode(value), as: UTF8.self))
     }
 
     private static func callerTerminalID() throws -> UUID {
@@ -432,42 +534,269 @@ private enum SoraCLI {
     private static func runAgentCommand(
         _ arguments: [String], client: SoraClient
     ) throws {
-        switch arguments.first {
-        case "install", "uninstall":
-            guard arguments.count == 2 else { throw CLIError.usage(agentUsage) }
-            let integrations = try agentIntegrations(named: arguments[1])
-            let files = try integrations.map { ($0, try $0.contents()) }
-            for (integration, contents) in files {
-                if let existing = try? Data(contentsOf: integration.destination), existing != contents {
-                    throw CLIError.usage(
-                        "Refusing to overwrite conflicting \(integration.name) integration at \(integration.destination.path)"
-                    )
-                }
-            }
-            for (integration, contents) in files {
-                if arguments[0] == "install" {
-                    try FileManager.default.createDirectory(
-                        at: integration.destination.deletingLastPathComponent(),
-                        withIntermediateDirectories: true
-                    )
-                    try contents.write(to: integration.destination, options: .atomic)
-                    print("Installed \(integration.name) integration at \(integration.destination.path)")
-                } else if FileManager.default.fileExists(atPath: integration.destination.path) {
-                    try FileManager.default.removeItem(at: integration.destination)
-                    print("Removed \(integration.name) integration from \(integration.destination.path)")
-                }
-            }
+        guard let command = arguments.first else { throw CLIError.usage(agentUsage) }
+        let tail = Array(arguments.dropFirst())
+        switch command {
+        case "list":
+            guard tail.isEmpty,
+                  case .agents(let agents) = try client.send(.listAgents(
+                    callerTerminalID: try callerTerminalID()
+                  )) else { throw CLIError.usage(agentUsage) }
+            printJSON(agents)
+        case "get":
+            var index = 0
+            let target = try parseAgentTarget(tail, index: &index)
+            guard index == tail.count,
+                  case .agent(let agent) = try client.send(.getAgent(
+                    callerTerminalID: try callerTerminalID(), target: target
+                  )) else { throw CLIError.usage(agentUsage) }
+            printJSON(agent)
+        case "start":
+            try startAgent(tail, client: client)
+        case "prompt":
+            try promptAgent(tail, client: client)
+        case "read":
+            try readAgent(tail, client: client)
+        case "wait":
+            try waitForAgent(tail, client: client)
         case "state":
-            guard arguments.count == 2,
-                  let state = SoraAgentReportState(rawValue: arguments[1])
-            else { throw CLIError.usage("Usage: sora agent state <working|blocked|idle>") }
-            guard case .acknowledged = try client.send(
-                .reportAgentState(terminalID: try callerTerminalID(), state: state),
-                launchIfNeeded: false
-            ) else { throw CLIError.transport("Unexpected response") }
+            guard tail.count == 1, let state = SoraAgentReportState(rawValue: tail[0]),
+                  case .acknowledged = try client.send(
+                    .reportAgentState(terminalID: try callerTerminalID(), state: state),
+                    launchIfNeeded: false
+                  ) else { throw CLIError.usage("Usage: sora agent state <working|blocked|idle>") }
+        case "install", "uninstall":
+            guard tail.count == 1 else { throw CLIError.usage(agentUsage) }
+            try manageAgentIntegrations(action: command, name: tail[0])
+        case "skill":
+            try manageAgentSkill(tail)
         default:
             throw CLIError.usage(agentUsage)
         }
+    }
+
+    private static func startAgent(_ arguments: [String], client: SoraClient) throws {
+        guard let alias = arguments.first, !alias.hasPrefix("--") else {
+            throw CLIError.usage(agentUsage)
+        }
+        var paneID: UUID?
+        var kind: SoraAgentKind?
+        var focus = false
+        var timeout = 30_000
+        var extra: [String] = []
+        var index = 1
+        while index < arguments.count {
+            if arguments[index] == "--" {
+                extra = Array(arguments.dropFirst(index + 1))
+                break
+            }
+            switch arguments[index] {
+            case "--pane": paneID = try uuidValue(after: &index, in: arguments, option: "--pane")
+            case "--kind":
+                let raw = try value(after: &index, in: arguments, option: "--kind")
+                kind = SoraAgentKind(rawValue: raw)
+            case "--focus": focus = true
+            case "--timeout": timeout = try intValue(after: &index, in: arguments, option: "--timeout")
+            default: throw CLIError.usage(agentUsage)
+            }
+            index += 1
+        }
+        guard let kind, (3_000...300_000).contains(timeout),
+              case .agent(let agent) = try client.send(.startAgent(
+                callerTerminalID: try callerTerminalID(), paneID: paneID,
+                alias: alias, kind: kind, arguments: extra, focus: focus,
+                timeoutMilliseconds: timeout
+              )) else { throw CLIError.usage(agentUsage) }
+        printJSON(agent)
+    }
+
+    private static func promptAgent(_ arguments: [String], client: SoraClient) throws {
+        var index = 0
+        let target = try parseAgentTarget(arguments, index: &index)
+        var text: String?
+        var wait = false
+        var timeout = 120_000
+        while index < arguments.count {
+            switch arguments[index] {
+            case "--text": text = try value(after: &index, in: arguments, option: "--text")
+            case "--wait": wait = true
+            case "--timeout": timeout = try intValue(after: &index, in: arguments, option: "--timeout")
+            default: throw CLIError.usage(agentUsage)
+            }
+            index += 1
+        }
+        guard let text, !text.isEmpty,
+              case .agent(let submitted) = try client.send(.promptAgent(
+                callerTerminalID: try callerTerminalID(), target: target, text: text
+              )) else { throw CLIError.usage(agentUsage) }
+        guard wait else { printJSON(submitted); return }
+        guard case .agent(let completed) = try client.send(.waitForAgent(
+            callerTerminalID: try callerTerminalID(), target: target,
+            states: [.idle, .done, .blocked], timeoutMilliseconds: timeout
+        )) else { throw CLIError.transport("Unexpected response") }
+        printJSON(completed)
+    }
+
+    private static func readAgent(_ arguments: [String], client: SoraClient) throws {
+        var index = 0
+        let target = try parseAgentTarget(arguments, index: &index)
+        var lines = 120
+        while index < arguments.count {
+            guard arguments[index] == "--lines" else { throw CLIError.usage(agentUsage) }
+            lines = try intValue(after: &index, in: arguments, option: "--lines")
+            index += 1
+        }
+        guard case .output(let output) = try client.send(.readAgent(
+            callerTerminalID: try callerTerminalID(), target: target, lines: lines
+        )) else { throw CLIError.transport("Unexpected response") }
+        print(output)
+    }
+
+    private static func waitForAgent(_ arguments: [String], client: SoraClient) throws {
+        var index = 0
+        let target = try parseAgentTarget(arguments, index: &index)
+        var states: [SoraAgentState] = [.idle, .done, .blocked]
+        var timeout = 120_000
+        while index < arguments.count {
+            switch arguments[index] {
+            case "--state":
+                let raw = try value(after: &index, in: arguments, option: "--state")
+                states = try raw.split(separator: ",").map {
+                    guard let state = SoraAgentState(rawValue: String($0)) else {
+                        throw CLIError.usage(agentUsage)
+                    }
+                    return state
+                }
+            case "--timeout": timeout = try intValue(after: &index, in: arguments, option: "--timeout")
+            default: throw CLIError.usage(agentUsage)
+            }
+            index += 1
+        }
+        guard case .agent(let agent) = try client.send(.waitForAgent(
+            callerTerminalID: try callerTerminalID(), target: target,
+            states: states, timeoutMilliseconds: timeout
+        )) else { throw CLIError.transport("Unexpected response") }
+        printJSON(agent)
+    }
+
+    private static func parseAgentTarget(
+        _ arguments: [String], index: inout Int
+    ) throws -> SoraAgentTarget {
+        guard index < arguments.count else { throw CLIError.usage(agentUsage) }
+        if arguments[index] == "--pane" {
+            let pane = try uuidValue(after: &index, in: arguments, option: "--pane")
+            index += 1
+            return .pane(pane)
+        }
+        guard !arguments[index].hasPrefix("--") else { throw CLIError.usage(agentUsage) }
+        let alias = arguments[index]
+        index += 1
+        return .alias(alias)
+    }
+
+    private static func manageAgentIntegrations(action: String, name: String) throws {
+        let integrations = try agentIntegrations(named: name)
+        let files = try integrations.map { ($0, try $0.contents()) }
+        for (integration, contents) in files {
+            if let existing = try? Data(contentsOf: integration.destination), existing != contents {
+                throw CLIError.usage(
+                    "Refusing to overwrite conflicting \(integration.name) integration at \(integration.destination.path)"
+                )
+            }
+        }
+        for (integration, contents) in files {
+            if action == "install" {
+                try FileManager.default.createDirectory(
+                    at: integration.destination.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try contents.write(to: integration.destination, options: .atomic)
+                print("Installed \(integration.name) integration at \(integration.destination.path)")
+            } else if FileManager.default.fileExists(atPath: integration.destination.path) {
+                try FileManager.default.removeItem(at: integration.destination)
+                print("Removed \(integration.name) integration from \(integration.destination.path)")
+            }
+        }
+    }
+
+    private static func manageAgentSkill(_ arguments: [String]) throws {
+        guard let action = arguments.first, arguments.count <= 2 else {
+            throw CLIError.usage(skillUsage)
+        }
+        let source = try bundledSkillURL()
+        if action == "path" { print(source.path); return }
+        if action == "print" {
+            guard arguments.count == 1 else { throw CLIError.usage(skillUsage) }
+            FileHandle.standardOutput.write(try Data(contentsOf: source))
+            return
+        }
+        let provider = arguments.count == 2 ? arguments[1] : "all"
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let destinations: [URL] = switch provider {
+        case "all": [
+            home.appendingPathComponent(".agents/skills/sora-automation/SKILL.md"),
+            home.appendingPathComponent(".claude/skills/sora-automation/SKILL.md"),
+        ]
+        case "shared": [home.appendingPathComponent(".agents/skills/sora-automation/SKILL.md")]
+        case "claude": [home.appendingPathComponent(".claude/skills/sora-automation/SKILL.md")]
+        default: throw CLIError.usage(skillUsage)
+        }
+        if action == "status" {
+            printJSON(destinations.map { SkillStatus(
+                path: $0.path, status: skillStatus(at: $0, source: source)
+            ) })
+            return
+        }
+        guard action == "install" || action == "uninstall" else {
+            throw CLIError.usage(skillUsage)
+        }
+        for destination in destinations {
+            if action == "install" {
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    let values = try destination.resourceValues(forKeys: [.isSymbolicLinkKey])
+                    guard values.isSymbolicLink == true,
+                          destination.resolvingSymlinksInPath() == source.resolvingSymlinksInPath()
+                    else { throw CLIError.usage("Refusing to replace modified skill at \(destination.path)") }
+                    continue
+                }
+                try FileManager.default.createDirectory(
+                    at: destination.deletingLastPathComponent(), withIntermediateDirectories: true
+                )
+                try FileManager.default.createSymbolicLink(at: destination, withDestinationURL: source)
+            } else if FileManager.default.fileExists(atPath: destination.path) {
+                let values = try destination.resourceValues(forKeys: [.isSymbolicLinkKey])
+                guard values.isSymbolicLink == true,
+                      destination.resolvingSymlinksInPath() == source.resolvingSymlinksInPath()
+                else { throw CLIError.usage("Refusing to remove modified skill at \(destination.path)") }
+                try FileManager.default.removeItem(at: destination)
+            }
+        }
+        printJSON(destinations.map(\.path))
+    }
+
+    private struct SkillStatus: Codable { let path: String; let status: String }
+
+    private static func skillStatus(at destination: URL, source: URL) -> String {
+        guard FileManager.default.fileExists(atPath: destination.path) else { return "missing" }
+        guard (try? destination.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true,
+              destination.resolvingSymlinksInPath() == source.resolvingSymlinksInPath()
+        else { return "modified" }
+        return "installed"
+    }
+
+    private static func bundledSkillURL() throws -> URL {
+        let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+        let resources = executable.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Resources", isDirectory: true)
+        let candidates = [
+            resources.appendingPathComponent("Skills/sora-automation/SKILL.md"),
+            resources.appendingPathComponent("sora-automation/SKILL.md"),
+            resources.appendingPathComponent("SKILL.md"),
+        ]
+        guard let source = candidates.first(where: {
+            FileManager.default.fileExists(atPath: $0.path)
+        }) else { throw CLIError.unavailable }
+        return source
     }
 
     private struct AgentIntegration {
@@ -593,24 +922,49 @@ private enum SoraCLI {
     """#
 
     private static let runUsage = "sora run --space <id-or-path> [--name <name>] -- <command> [arguments…]"
+    private static let tabUsage = """
+    Usage:
+      sora tab current
+      sora tab list
+      sora tab get <id>
+      sora tab create (--pinned|--temporary) [--name <name>] [--cwd <path>] [--focus]
+      sora tab focus <id>
+      sora tab pin <id>
+      sora tab unpin <id>
+    """
     private static let paneUsage = """
     Usage:
       sora pane current
       sora pane list
+      sora pane get --pane <id>
       sora pane split [--pane <id>] [--left|--right|--up|--down] [--cwd <path>] [--focus]
-      sora pane send [--pane <id>] --text <text> [--submit]
+      sora pane run [--pane <id>] -- <command> [arguments…]
+      sora pane send [--pane <id>] --text <text> [--submit]    # raw terminal I/O
       sora pane read [--pane <id>] [--lines <count>]
       sora pane wait [--pane <id>] --contains <text> [--timeout <ms>] [--lines <count>]
       sora pane focus [--pane <id>]
     """
     private static let agentUsage = """
     Usage:
+      sora agent list
+      sora agent get <alias>|--pane <id>
+      sora agent start <alias> --kind <kind> [--pane <id>] [--focus] [--timeout <ms>] [-- arguments…]
+      sora agent prompt <alias>|--pane <id> --text <prompt> [--wait] [--timeout <ms>]
+      sora agent read <alias>|--pane <id> [--lines <count>]
+      sora agent wait <alias>|--pane <id> [--state idle,done,blocked] [--timeout <ms>]
+      sora agent skill <path|print|status|install|uninstall> [all|shared|claude]
       sora agent install <pi|opencode|grok|all>
       sora agent uninstall <pi|opencode|grok|all>
       sora agent state <working|blocked|idle>
+
+    Agent commands use the invoking terminal's Space. start requires an existing
+    available shell and never creates layout. prompt never passes through a shell.
     """
+    private static let skillUsage = "Usage: sora agent skill <path|print|status|install|uninstall> [all|shared|claude]"
     private static let spaceUsage = """
     Usage:
+      sora space current
+      sora space get <id>
       sora space list
       sora space create --name <name> [--icon <symbol>] [--repository <path>]…
       sora space select <id>
@@ -619,17 +973,11 @@ private enum SoraCLI {
     """
     private static let usage = """
     Usage:
-      sora mcp
       sora status
-      sora space list
-      sora space create --name <name> [--icon <symbol>] [--repository <path>]…
-      sora space select <id>
-      sora space rename <id> <name>
-      sora space remove <id> --force
-      sora pane <current|list|split|send|read|wait|focus> [options]
-      sora agent install <pi|opencode|grok|all>
-      sora agent uninstall <pi|opencode|grok|all>
-      sora agent state <working|blocked|idle>
+      sora space <current|get|list|create|select|rename|remove> [options]
+      sora tab <current|get|list|create|focus|pin|unpin> [options]
+      sora pane <current|get|list|split|run|send|read|wait|focus> [options]
+      sora agent <list|get|start|prompt|read|wait|skill> [options]
       sora open <path>
       sora send <terminal-id> <text> [--submit]
       sora output <terminal-id> [--lines <count>]

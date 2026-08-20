@@ -18,8 +18,6 @@
 		BB0000000000000000000021 /* SoraAutomationProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000003 /* SoraAutomationProtocol.swift */; };
 		BB0000000000000000000022 /* SoraAutomationProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000003 /* SoraAutomationProtocol.swift */; };
 		BB0000000000000000000023 /* sora in Embed Helper */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000001 /* sora */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
-		BB0000000000000000000024 /* SoraMCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000004 /* SoraMCP.swift */; };
-		BB0000000000000000000025 /* MCP in Frameworks */ = {isa = PBXBuildFile; productRef = BB00000000000000000000F1 /* MCP */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,7 +27,6 @@
 		BB0000000000000000000001 /* sora */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = sora; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB0000000000000000000002 /* SoraCLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoraCLI.swift; sourceTree = "<group>"; };
 		BB0000000000000000000003 /* SoraAutomationProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoraAutomationProtocol.swift; sourceTree = "<group>"; };
-		BB0000000000000000000004 /* SoraMCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoraMCP.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -82,7 +79,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				BB0000000000000000000025 /* MCP in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -125,7 +121,6 @@
 			isa = PBXGroup;
 			children = (
 				BB0000000000000000000002 /* SoraCLI.swift */,
-				BB0000000000000000000004 /* SoraMCP.swift */,
 			);
 			path = "sora-cli";
 			sourceTree = "<group>";
@@ -163,7 +158,6 @@
 			);
 			name = "sora-cli";
 			packageProductDependencies = (
-				BB00000000000000000000F1 /* MCP */,
 			);
 			productName = sora;
 			productReference = BB0000000000000000000001 /* sora */;
@@ -235,7 +229,6 @@
 				AA10000000000000000000D0 /* XCRemoteSwiftPackageReference "PierreDiffsSwift" */,
 				AA10000000000000000000E0 /* XCRemoteSwiftPackageReference "Sparkle" */,
 				AA20000000000000000000A0 /* XCRemoteSwiftPackageReference "STTextView-Plugin-Neon" */,
-				BB00000000000000000000F0 /* XCRemoteSwiftPackageReference "swift-sdk" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = FF3FDD74300B6A7400112486 /* Products */;
@@ -287,7 +280,6 @@
 			files = (
 				BB0000000000000000000020 /* SoraCLI.swift in Sources */,
 				BB0000000000000000000021 /* SoraAutomationProtocol.swift in Sources */,
-				BB0000000000000000000024 /* SoraMCP.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -622,14 +614,6 @@
 				revision = 5a30db4ce7908a5414e7b499e2379bdc49991cd1;
 			};
 		};
-		BB00000000000000000000F0 /* XCRemoteSwiftPackageReference "swift-sdk" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/modelcontextprotocol/swift-sdk";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.12.1;
-			};
-		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -663,11 +647,6 @@
 		AA30000000000000000000A1 /* TreeSitterTSX */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = TreeSitterTSX;
-		};
-		BB00000000000000000000F1 /* MCP */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = BB00000000000000000000F0 /* XCRemoteSwiftPackageReference "swift-sdk" */;
-			productName = MCP;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

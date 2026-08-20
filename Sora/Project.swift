@@ -207,6 +207,21 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
         return session
     }
 
+    /// Creates a terminal tab for automation without changing the user's
+    /// selection unless focus was requested.
+    func automationCreateTerminalTab(
+        directory: String?, name: String?, pinned: Bool, focus: Bool
+    ) -> (tab: PaneTab, session: TerminalSession) {
+        let previousSelection = selectedTabID
+        let session = makeSession(directory: directory)
+        let tab = makeTab(content: .session(session))
+        tab.customName = name
+        tab.isPinned = pinned
+        insertNextToSelected(tab)
+        if focus { selectedTabID = tab.id } else { selectedTabID = previousSelection }
+        return (tab, session)
+    }
+
     /// Builds a session wired for exit + change observation, without placing
     /// it in a tab — shared by new tabs and splits. `restoredHistory` seeds the
     /// scrollback when reopening a saved session.

@@ -232,7 +232,7 @@ struct SettingsView: View {
             settingsSection("Local automation", detail: "Controlled helper access for the projects you can see.") {
                 settingToggle(
                     "Allow helpers",
-                    detail: "Lets Sora’s CLI and MCP helper open projects and control visible terminals on this Mac.",
+                    detail: "Lets Sora’s CLI coordinate Spaces, tabs, panes, and agents on this Mac.",
                     isOn: $settings.allowLocalAutomation
                 )
 

@@ -20,6 +20,7 @@ struct SidebarView: View {
     @State private var isFullScreen = false
     @State private var draggedTabID: UUID?
     @State private var tabFrames: [UUID: CGRect] = [:]
+    @State private var temporarySectionY = CGFloat.infinity
     @State private var swipeOffset: CGFloat = 0
     @State private var projectBeingRenamed: Project?
     @State private var renameDraft = ""
@@ -77,6 +78,7 @@ struct SidebarView: View {
             )
         }
         .onPreferenceChange(SidebarTabFramePreferenceKey.self) { tabFrames = $0 }
+        .onPreferenceChange(SidebarTemporarySectionPreferenceKey.self) { temporarySectionY = $0 }
         .alert("Rename Space", isPresented: Binding(
             get: { projectBeingRenamed != nil },
             set: { if !$0 { projectBeingRenamed = nil } }
@@ -194,6 +196,14 @@ struct SidebarView: View {
                     }
                     .buttonStyle(.plain)
                     .help("New Terminal (⌘T)")
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: SidebarTemporarySectionPreferenceKey.self,
+                                value: proxy.frame(in: .global).minY
+                            )
+                        }
+                    }
 
                     ForEach(temporary) { tab in
                         tabRow(tab, project: project, isPinned: false)
@@ -449,12 +459,16 @@ struct SidebarView: View {
     private func updateTabDrag(source: UUID, location: CGPoint, project: Project) {
         draggedTabID = source
         NSCursor.closedHand.set()
-        guard let target = tabFrames.first(where: {
+        let target = tabFrames.first(where: {
             $0.key != source && $0.value.contains(location)
-        })?.key else { return }
+        })?.key
 
         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.12)) {
-            project.moveTab(source, to: target)
+            if let target {
+                project.moveTab(source, to: target)
+            } else {
+                project.setPinned(location.y < temporarySectionY, tabID: source)
+            }
         }
     }
 
@@ -716,6 +730,14 @@ private struct SidebarTabFramePreferenceKey: PreferenceKey {
 
     static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
         value.merge(nextValue()) { $1 }
+    }
+}
+
+private struct SidebarTemporarySectionPreferenceKey: PreferenceKey {
+    static let defaultValue = CGFloat.infinity
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = min(value, nextValue())
     }
 }
 

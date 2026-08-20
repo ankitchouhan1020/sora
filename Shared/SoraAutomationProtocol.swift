@@ -18,6 +18,7 @@ nonisolated enum SoraAutomationEndpoint {
 
 nonisolated enum SoraAutomationRequest: Codable, Equatable {
     case listSpaces
+    case currentSpace(callerTerminalID: UUID)
     case createSpace(name: String, icon: String?, repositories: [String])
     case selectSpace(id: UUID)
     case renameSpace(id: UUID, name: String)
@@ -34,29 +35,83 @@ nonisolated enum SoraAutomationRequest: Codable, Equatable {
     case closeTerminal(id: UUID)
     case reportAgentState(terminalID: UUID, state: SoraAgentReportState)
 
-    // Pane operations are capability-scoped by the terminal invoking them.
-    // A nil pane target means that invoking terminal's pane.
+    // Tab, pane, and agent operations are scoped by the invoking terminal's Space.
+    case currentTab(callerTerminalID: UUID)
+    case listTabs(callerTerminalID: UUID)
+    case getTab(callerTerminalID: UUID, tabID: UUID)
+    case createTerminalTab(
+        callerTerminalID: UUID, name: String?, directory: String?, pinned: Bool, focus: Bool
+    )
+    case focusTab(callerTerminalID: UUID, tabID: UUID)
+    case setTabPinned(callerTerminalID: UUID, tabID: UUID, pinned: Bool)
+
     case currentPane(callerTerminalID: UUID)
     case listPanes(callerTerminalID: UUID)
+    case getPane(callerTerminalID: UUID, paneID: UUID)
     case splitPane(
         callerTerminalID: UUID, paneID: UUID?, edge: SoraPaneEdge,
         directory: String?, focus: Bool
     )
-    case sendPaneInput(
-        callerTerminalID: UUID, paneID: UUID?, text: String, submit: Bool
-    )
+    case runInPane(callerTerminalID: UUID, paneID: UUID?, arguments: [String])
+    case sendPaneInput(callerTerminalID: UUID, paneID: UUID?, text: String, submit: Bool)
     case readPaneOutput(callerTerminalID: UUID, paneID: UUID?, lines: Int)
     case waitForPaneOutput(
         callerTerminalID: UUID, paneID: UUID?, contains: String,
         timeoutMilliseconds: Int, lines: Int
     )
     case focusPane(callerTerminalID: UUID, paneID: UUID?)
+
+    case listAgents(callerTerminalID: UUID)
+    case getAgent(callerTerminalID: UUID, target: SoraAgentTarget)
+    case startAgent(
+        callerTerminalID: UUID, paneID: UUID?, alias: String,
+        kind: SoraAgentKind, arguments: [String], focus: Bool,
+        timeoutMilliseconds: Int
+    )
+    case promptAgent(callerTerminalID: UUID, target: SoraAgentTarget, text: String)
+    case readAgent(callerTerminalID: UUID, target: SoraAgentTarget, lines: Int)
+    case waitForAgent(
+        callerTerminalID: UUID, target: SoraAgentTarget,
+        states: [SoraAgentState], timeoutMilliseconds: Int
+    )
 }
 
 nonisolated enum SoraAgentReportState: String, Codable, Equatable {
     case working
     case blocked
     case idle
+}
+
+nonisolated enum SoraAgentKind: String, Codable, Equatable, CaseIterable {
+    case claude
+    case codex
+    case gemini
+    case grok
+    case pi
+    case cursorAgent = "cursor-agent"
+    case openCode = "opencode"
+    case copilot
+    case kimi
+    case amp
+
+    var executable: String { rawValue }
+}
+
+nonisolated enum SoraAgentState: String, Codable, Equatable {
+    case created
+    case working
+    case blocked
+    case done
+    case idle
+    case unknown
+}
+
+nonisolated struct SoraAgentTarget: Codable, Equatable {
+    var alias: String?
+    var paneID: UUID?
+
+    static func alias(_ alias: String) -> Self { Self(alias: alias, paneID: nil) }
+    static func pane(_ id: UUID) -> Self { Self(alias: nil, paneID: id) }
 }
 
 nonisolated enum SoraPaneEdge: String, Codable, Equatable {
@@ -100,8 +155,12 @@ nonisolated enum SoraAutomationResult: Codable, Equatable {
     case projects([SoraProjectSummary])
     case project(SoraProjectSummary)
     case terminal(SoraTerminalSummary)
+    case tab(SoraTabSummary)
+    case tabs([SoraTabSummary])
     case pane(SoraPaneSummary)
     case panes([SoraPaneSummary])
+    case agent(SoraAgentSummary)
+    case agents([SoraAgentSummary])
     case output(String)
     case acknowledged
 }
@@ -126,15 +185,25 @@ nonisolated struct SoraProjectSummary: Codable, Equatable {
 nonisolated struct SoraTerminalSummary: Codable, Equatable {
     var id: UUID
     var projectID: UUID
-    var spaceID: UUID { projectID }
+    var spaceID: UUID
     var name: String
     var directory: String
     var exited: Bool
 }
 
+nonisolated struct SoraTabSummary: Codable, Equatable {
+    var id: UUID
+    var spaceID: UUID
+    var title: String
+    var pinned: Bool
+    var selected: Bool
+    var paneCount: Int
+}
+
 nonisolated struct SoraPaneSummary: Codable, Equatable {
     var id: UUID
     var projectID: UUID
+    var spaceID: UUID
     var tabID: UUID
     var terminalID: UUID?
     var title: String
@@ -145,6 +214,20 @@ nonisolated struct SoraPaneSummary: Codable, Equatable {
     var exited: Bool?
 }
 
+nonisolated struct SoraAgentSummary: Codable, Equatable {
+    var alias: String
+    var kind: SoraAgentKind
+    var arguments: [String]
+    var state: SoraAgentState
+    var spaceID: UUID
+    var tabID: UUID
+    var paneID: UUID
+    var terminalID: UUID
+    var title: String
+    var directory: String
+    var focused: Bool
+}
+
 nonisolated struct SoraAutomationFailure: Error, Codable, Equatable {
     enum Code: String, Codable {
         case automationDisabled
@@ -152,11 +235,17 @@ nonisolated struct SoraAutomationFailure: Error, Codable, Equatable {
         case invalidPath
         case spaceNotFound
         case projectNotFound
+        case tabNotFound
         case terminalNotFound
         case terminalExited
         case paneNotFound
         case paneNotTerminal
         case paneNotSplittable
+        case shellBusy
+        case aliasInUse
+        case agentNotFound
+        case agentNotRunning
+        case agentBlocked
         case waitTimedOut
         case noWindow
         case outputUnavailable

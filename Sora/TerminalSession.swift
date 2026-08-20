@@ -27,6 +27,10 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
     @Published var hasExited = false
     @Published private(set) var activity: TerminalActivity = .terminal
     @Published private(set) var agentState: AgentDisplayState?
+    private(set) var automationAgentAlias: String?
+    private(set) var automationAgentKind: AgentKind?
+    private(set) var automationAgentArguments: [String] = []
+    private var automationAgentLaunchDeadline: Date?
     /// Live cwd of a foreground job such as an agent that moved to a worktree.
     @Published private(set) var foregroundDirectoryPath: String?
     @Published private(set) var commandLifecycle = TerminalCommandLifecycle()
@@ -49,7 +53,8 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
     private var cachedShellPid: pid_t?
     private var lastHistorySnapshot: String?
     private var pendingCommands: [String] = []
-    private var commandFlushTask: Task<Void, Never>?
+    private var isInputReady: Bool
+    private var inputReadinessTask: Task<Void, Never>?
     private var activityMonitorTask: Task<Void, Never>?
     private var activityTracker = TerminalActivityTracker()
     private var agentStateTracker = AgentStateTracker()
@@ -88,6 +93,7 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
         )
 
         self.shellPath = shellPath
+        isInputReady = directCommand != nil
         self.backend = backend
         launchWorkingDirectory = directory
         launchDirectoryURL = artifacts.directoryURL
@@ -104,9 +110,11 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
         installOverlayScrollbar()
         applyTheme()
         startActivityMonitoring()
+        if !isInputReady { monitorInputReadiness() }
     }
 
     deinit {
+        inputReadinessTask?.cancel()
         activityMonitorTask?.cancel()
         if let launchDirectoryURL {
             try? FileManager.default.removeItem(at: launchDirectoryURL)
@@ -143,7 +151,7 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
     func terminate() {
         guard !hasExited, !isTerminating else { return }
         isTerminating = true
-        commandFlushTask?.cancel()
+        inputReadinessTask?.cancel()
         pendingCommands.removeAll()
         beginTeardown(processAlive: true, notifyExit: false)
     }
@@ -242,9 +250,18 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
                         if activity.agentKind == nil {
                             self.agentStateTracker.reset()
                             self.agentState = nil
+                            if self.automationAgentLaunchDeadline == nil {
+                                self.clearAutomationAgent()
+                            }
                         } else {
+                            self.automationAgentLaunchDeadline = nil
                             self.agentState = self.agentStateTracker.displayState
                         }
+                    }
+                    if observed == .terminal,
+                       let deadline = self.automationAgentLaunchDeadline,
+                       Date() >= deadline {
+                        self.clearAutomationAgent()
                     }
                 }
                 try? await Task.sleep(for: TerminalActivityMonitorPolicy.interval(
@@ -258,6 +275,50 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
     func reportAgentState(_ state: AgentLifecycleState, isVisible: Bool) {
         agentStateTracker.report(state, isVisible: isVisible)
         if activity.agentKind != nil { agentState = agentStateTracker.displayState }
+    }
+
+    var canAcceptAutomationCommand: Bool {
+        guard !hasExited, activity == .terminal else { return false }
+        if !isInputReady { return true } // sendCommand queues through shell startup.
+        guard let shellPid else { return false }
+        return surface.foregroundPid == shellPid
+    }
+
+    func declareAutomationAgent(
+        alias: String, kind: AgentKind, arguments: [String], timeoutMilliseconds: Int
+    ) {
+        automationAgentAlias = alias
+        automationAgentKind = kind
+        automationAgentArguments = arguments
+        automationAgentLaunchDeadline = Date().addingTimeInterval(
+            Double(timeoutMilliseconds) / 1_000
+        )
+    }
+
+    private func clearAutomationAgent() {
+        automationAgentAlias = nil
+        automationAgentKind = nil
+        automationAgentArguments = []
+        automationAgentLaunchDeadline = nil
+    }
+
+    func sendArguments(_ arguments: [String]) {
+        sendCommand(arguments.map(Self.shellQuote).joined(separator: " ") + "\r")
+    }
+
+    /// Agent prompts bypass the shell entirely. Bracketed paste keeps multiline
+    /// text one editor operation, and Enter remains a separate submission.
+    func sendAutomationPrompt(_ text: String) {
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        agentStateTracker.report(.working, isVisible: false)
+        agentState = agentStateTracker.displayState
+        if normalized.contains("\n") {
+            surface.sendText("\u{1B}[200~" + normalized + "\u{1B}[201~")
+        } else {
+            surface.sendText(normalized)
+        }
+        surface.sendText("\r")
     }
 
     func markAgentSeen() {
@@ -291,32 +352,47 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
     }
 
     func sendCommand(_ text: String) {
-        if surface.foregroundPid != nil, pendingCommands.isEmpty {
+        guard !isInputReady else {
             surface.sendText(text)
             return
         }
         pendingCommands.append(text)
-        flushPendingCommandsWhenReady()
     }
 
-    private func flushPendingCommandsWhenReady() {
-        guard commandFlushTask == nil, !pendingCommands.isEmpty else { return }
-        commandFlushTask = Task { @MainActor [weak self] in
-            // ponytail: poll the backend's real PID readiness; replace only if
-            // surfaces gain a dedicated process-start callback.
-            for _ in 0..<250 {
+    private func monitorInputReadiness() {
+        inputReadinessTask = Task { @MainActor [weak self] in
+            var readySamples = 0
+            for attempt in 0..<500 {
                 guard let self, !Task.isCancelled, !self.hasExited else { return }
-                if self.surface.foregroundPid != nil {
-                    let commands = self.pendingCommands
-                    self.pendingCommands.removeAll()
-                    self.commandFlushTask = nil
-                    commands.forEach(self.surface.sendText)
+                if let shellPID = self.shellPid,
+                   TerminalProcessSnapshot.isShellAwaitingInput(shellPID) {
+                    readySamples += 1
+                    if readySamples >= 3 {
+                        self.markInputReady()
+                        return
+                    }
+                } else {
+                    readySamples = 0
+                }
+                // ponytail: kernel process state is the reliable local signal;
+                // keep a one-second fallback for unusual shells that never
+                // expose an idle foreground process.
+                if attempt == 49, self.surface.foregroundPid != nil {
+                    self.markInputReady()
                     return
                 }
                 try? await Task.sleep(for: .milliseconds(20))
             }
-            self?.commandFlushTask = nil
+            self?.inputReadinessTask = nil
         }
+    }
+
+    private func markInputReady() {
+        isInputReady = true
+        inputReadinessTask = nil
+        let commands = pendingCommands
+        pendingCommands.removeAll()
+        commands.forEach(surface.sendText)
     }
 
     /// Clears the emulator's visible screen and scrollback, then asks the

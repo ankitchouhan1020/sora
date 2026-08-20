@@ -36,6 +36,9 @@ enum SoraAutomationController {
         switch request {
         case .listSpaces:
             return .spaces(TerminalManager.automationManagers.flatMap(spaceSummaries))
+        case .currentSpace(let callerTerminalID):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            return .space(spaceSummary(caller.project, in: caller.manager))
         case .createSpace(let name, let icon, let repositories):
             guard let name = try validateName(name) else {
                 throw failure(.invalidRequest, "name is required")
@@ -120,6 +123,38 @@ enum SoraAutomationController {
                 isVisible: manager.isViewing(session, in: project)
             )
             return .acknowledged
+        case .currentTab(let callerTerminalID):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            return .tab(tabSummary(caller.tab, in: caller.project))
+        case .listTabs(let callerTerminalID):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            return .tabs(caller.project.tabs.map { tabSummary($0, in: caller.project) })
+        case .getTab(let callerTerminalID, let tabID):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            return .tab(tabSummary(try targetTab(tabID, caller: caller), in: caller.project))
+        case let .createTerminalTab(callerTerminalID, name, directory, pinned, shouldFocus):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            let created = caller.project.automationCreateTerminalTab(
+                directory: try directory.map(canonicalDirectory),
+                name: try validateName(name), pinned: pinned, focus: shouldFocus
+            )
+            if shouldFocus {
+                caller.manager.selectedProjectID = caller.project.id
+                caller.manager.activateForAutomation()
+            }
+            return .tab(tabSummary(created.tab, in: caller.project))
+        case .focusTab(let callerTerminalID, let tabID):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            let tab = try targetTab(tabID, caller: caller)
+            caller.project.selectedTabID = tab.id
+            caller.manager.selectedProjectID = caller.project.id
+            caller.manager.activateForAutomation()
+            return .tab(tabSummary(tab, in: caller.project))
+        case .setTabPinned(let callerTerminalID, let tabID, let pinned):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            let tab = try targetTab(tabID, caller: caller)
+            caller.project.setPinned(pinned, tabID: tab.id)
+            return .tab(tabSummary(tab, in: caller.project))
         case .currentPane(let callerTerminalID):
             let caller = try callerContext(terminalID: callerTerminalID)
             return .pane(paneSummary(caller, callerPaneID: caller.pane.id))
@@ -128,6 +163,11 @@ enum SoraAutomationController {
             return .panes(projectPaneContexts(caller.project, manager: caller.manager).map {
                 paneSummary($0, callerPaneID: caller.pane.id)
             })
+        case .getPane(let callerTerminalID, let paneID):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            return .pane(paneSummary(
+                try targetPane(paneID, caller: caller), callerPaneID: caller.pane.id
+            ))
         case let .splitPane(callerTerminalID, paneID, edge, directory, shouldFocus):
             let caller = try callerContext(terminalID: callerTerminalID)
             let target = try targetPane(paneID, caller: caller)
@@ -149,6 +189,15 @@ enum SoraAutomationController {
             )
             if shouldFocus { focus(context) }
             return .pane(paneSummary(context, callerPaneID: caller.pane.id))
+        case let .runInPane(callerTerminalID, paneID, arguments):
+            try validateArguments(arguments)
+            let caller = try callerContext(terminalID: callerTerminalID)
+            let session = try terminal(in: targetPane(paneID, caller: caller))
+            guard session.canAcceptAutomationCommand else {
+                throw failure(.shellBusy, "Commands require an available shell")
+            }
+            session.sendArguments(arguments)
+            return .acknowledged
         case let .sendPaneInput(callerTerminalID, paneID, text, submit):
             try validateText(text, field: "text")
             let caller = try callerContext(terminalID: callerTerminalID)
@@ -191,6 +240,87 @@ enum SoraAutomationController {
             let target = try targetPane(paneID, caller: caller)
             focus(target)
             return .pane(paneSummary(target, callerPaneID: caller.pane.id))
+        case .listAgents(let callerTerminalID):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            return .agents(try agentContexts(caller: caller).map(agentSummary))
+        case .getAgent(let callerTerminalID, let target):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            return .agent(try agentSummary(agentContext(target, caller: caller)))
+        case let .startAgent(
+            callerTerminalID, paneID, alias, kind, arguments, shouldFocus, timeoutMilliseconds
+        ):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            let target = try targetPane(paneID, caller: caller)
+            let session = try terminal(in: target)
+            guard validAlias(alias) else {
+                throw failure(.invalidRequest, "alias must be 1–64 ASCII letters, numbers, dots, underscores, or hyphens")
+            }
+            guard !agentContexts(caller: caller).contains(where: {
+                $0.session?.automationAgentAlias == alias && $0.session !== session
+            }) else { throw failure(.aliasInUse, "Another agent in this Space uses alias \(alias)") }
+            guard session.automationAgentAlias == nil, session.canAcceptAutomationCommand else {
+                throw failure(.shellBusy, "Agent start requires an available terminal shell")
+            }
+            try validateArguments([kind.executable] + arguments)
+            guard (3_000...maximumWaitMilliseconds).contains(timeoutMilliseconds) else {
+                throw failure(.invalidRequest, "timeoutMilliseconds must be between 3000 and \(maximumWaitMilliseconds)")
+            }
+            let appKind = agentKind(kind)
+            session.declareAutomationAgent(
+                alias: alias, kind: appKind, arguments: [kind.executable] + arguments,
+                timeoutMilliseconds: timeoutMilliseconds
+            )
+            if target.tab.customName == nil { target.tab.customName = alias }
+            session.sendArguments([kind.executable] + arguments)
+            if shouldFocus { focus(target) }
+            let deadline = Date().addingTimeInterval(Double(timeoutMilliseconds) / 1_000)
+            repeat {
+                if let detected = session.activity.agentKind {
+                    guard detected == appKind else {
+                        throw failure(.agentNotRunning, "Terminal launched \(detected.displayName), not \(kind.rawValue)")
+                    }
+                    return .agent(try agentSummary(target))
+                }
+                if session.automationAgentAlias == nil {
+                    throw failure(.agentNotRunning, "Agent exited before Sora recognized it")
+                }
+                try await Task.sleep(for: .milliseconds(100))
+            } while Date() < deadline
+            throw failure(.waitTimedOut, "Timed out waiting for \(kind.rawValue) to start")
+        case .promptAgent(let callerTerminalID, let target, let text):
+            try validateText(text, field: "text")
+            guard !text.isEmpty else { throw failure(.invalidRequest, "text is required") }
+            let caller = try callerContext(terminalID: callerTerminalID)
+            let context = try agentContext(target, caller: caller)
+            let summary = try agentSummary(context)
+            guard summary.state != .blocked else {
+                throw failure(.agentBlocked, "Agent needs user input; automation cannot answer it")
+            }
+            guard context.session?.activity.agentKind != nil else {
+                throw failure(.agentNotRunning, "Agent is not running")
+            }
+            context.session?.sendAutomationPrompt(text)
+            return .agent(try agentSummary(context))
+        case .readAgent(let callerTerminalID, let target, let lines):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            let context = try agentContext(target, caller: caller)
+            guard let session = context.session else {
+                throw failure(.paneNotTerminal, "Agent pane is not a terminal")
+            }
+            return .output(try output(from: session, lines: lines))
+        case let .waitForAgent(callerTerminalID, target, states, timeoutMilliseconds):
+            guard !states.isEmpty, (100...3_600_000).contains(timeoutMilliseconds) else {
+                throw failure(.invalidRequest, "states and timeoutMilliseconds are invalid")
+            }
+            let caller = try callerContext(terminalID: callerTerminalID)
+            let deadline = Date().addingTimeInterval(Double(timeoutMilliseconds) / 1_000)
+            repeat {
+                let context = try agentContext(target, caller: caller)
+                let summary = try agentSummary(context)
+                if states.contains(summary.state) { return .agent(summary) }
+                try await Task.sleep(for: .milliseconds(100))
+            } while Date() < deadline
+            throw failure(.waitTimedOut, "Timed out waiting for agent state")
         }
     }
 
@@ -227,6 +357,7 @@ enum SoraAutomationController {
         SoraTerminalSummary(
             id: session.id,
             projectID: project.id,
+            spaceID: project.id,
             name: project.tabs.first(where: { $0.sessions.contains { $0 === session } })?.displayTitle
                 ?? session.title,
             directory: session.currentDirectoryPath,
@@ -314,6 +445,24 @@ enum SoraAutomationController {
         throw failure(.terminalNotFound, "Invoking terminal is no longer open")
     }
 
+    private static func targetTab(_ id: UUID, caller: PaneContext) throws -> PaneTab {
+        guard let tab = caller.project.tabs.first(where: { $0.id == id }) else {
+            throw failure(.tabNotFound, "Tab was not found in the invoking Space")
+        }
+        return tab
+    }
+
+    private static func tabSummary(_ tab: PaneTab, in project: Project) -> SoraTabSummary {
+        SoraTabSummary(
+            id: tab.id,
+            spaceID: project.id,
+            title: tab.displayTitle ?? "Untitled",
+            pinned: tab.isPinned,
+            selected: project.selectedTabID == tab.id,
+            paneCount: tab.allPanes.count
+        )
+    }
+
     private static func projectPaneContexts(
         _ project: Project, manager: TerminalManager
     ) -> [PaneContext] {
@@ -357,6 +506,7 @@ enum SoraAutomationController {
         return SoraPaneSummary(
             id: context.pane.id,
             projectID: context.project.id,
+            spaceID: context.project.id,
             tabID: context.tab.id,
             terminalID: context.session?.id,
             title: context.pane.content.title,
@@ -368,6 +518,100 @@ enum SoraAutomationController {
             caller: context.pane.id == callerPaneID,
             exited: context.session?.hasExited
         )
+    }
+
+    private static func agentContexts(caller: PaneContext) -> [PaneContext] {
+        projectPaneContexts(caller.project, manager: caller.manager).filter {
+            guard let session = $0.session else { return false }
+            return session.automationAgentAlias != nil || session.activity.agentKind != nil
+        }
+    }
+
+    private static func agentContext(
+        _ target: SoraAgentTarget, caller: PaneContext
+    ) throws -> PaneContext {
+        let matches = agentContexts(caller: caller)
+        let context: PaneContext?
+        switch (target.alias, target.paneID) {
+        case (.some(let alias), nil):
+            context = matches.first { $0.session?.automationAgentAlias == alias }
+        case (nil, .some(let paneID)):
+            context = matches.first { $0.pane.id == paneID }
+        default:
+            throw failure(.invalidRequest, "Agent target requires exactly one alias or pane ID")
+        }
+        guard let context else {
+            throw failure(.agentNotFound, "Agent was not found in the invoking Space")
+        }
+        return context
+    }
+
+    private static func agentSummary(_ context: PaneContext) throws -> SoraAgentSummary {
+        guard let session = context.session,
+              let kind = session.activity.agentKind ?? session.automationAgentKind else {
+            throw failure(.agentNotFound, "Pane is not running a recognized agent")
+        }
+        let state: SoraAgentState
+        if session.activity.agentKind == nil {
+            state = .created
+        } else {
+            state = switch session.agentState {
+            case .blocked: .blocked
+            case .working: .working
+            case .done: .done
+            case .idle: .idle
+            case .unknown, nil: .unknown
+            }
+        }
+        return SoraAgentSummary(
+            alias: session.automationAgentAlias ?? automationAgentKind(kind).rawValue,
+            kind: automationAgentKind(kind), arguments: session.automationAgentArguments,
+            state: state,
+            spaceID: context.project.id, tabID: context.tab.id,
+            paneID: context.pane.id, terminalID: session.id,
+            title: context.tab.displayTitle ?? context.pane.content.title,
+            directory: session.currentDirectoryPath,
+            focused: context.manager.selectedProjectID == context.project.id
+                && context.project.selectedTabID == context.tab.id
+                && context.tab.focusedPaneID == context.pane.id
+        )
+    }
+
+    private static func agentKind(_ kind: SoraAgentKind) -> AgentKind {
+        switch kind {
+        case .claude: .claude
+        case .codex: .codex
+        case .gemini: .gemini
+        case .grok: .grok
+        case .pi: .pi
+        case .cursorAgent: .cursorAgent
+        case .openCode: .openCode
+        case .copilot: .copilot
+        case .kimi: .kimi
+        case .amp: .amp
+        }
+    }
+
+    private static func automationAgentKind(_ kind: AgentKind) -> SoraAgentKind {
+        switch kind {
+        case .claude: .claude
+        case .codex: .codex
+        case .gemini: .gemini
+        case .grok: .grok
+        case .pi: .pi
+        case .cursorAgent: .cursorAgent
+        case .openCode: .openCode
+        case .copilot: .copilot
+        case .kimi: .kimi
+        case .amp: .amp
+        }
+    }
+
+    private static func validAlias(_ alias: String) -> Bool {
+        !alias.isEmpty && alias.utf8.count <= 64 && alias.utf8.allSatisfy {
+            (65...90).contains($0) || (97...122).contains($0)
+                || (48...57).contains($0) || [45, 46, 95].contains($0)
+        }
     }
 
     private static func focus(_ context: PaneContext) {
@@ -481,6 +725,17 @@ enum SoraAutomationController {
     private static func validateText(_ text: String, field: String) throws {
         guard text.utf8.count <= maximumTextBytes else {
             throw failure(.invalidRequest, "\(field) exceeds \(maximumTextBytes) bytes")
+        }
+    }
+
+    private static func validateArguments(_ arguments: [String]) throws {
+        guard !arguments.isEmpty, arguments.count <= 128,
+              arguments.allSatisfy({ argument in
+                  argument.utf8.count <= 16_384 && argument.unicodeScalars.allSatisfy {
+                      $0.value == 9 || !CharacterSet.controlCharacters.contains($0)
+                  }
+              }) else {
+            throw failure(.invalidRequest, "arguments are empty, too large, or contain terminal controls")
         }
     }
 
