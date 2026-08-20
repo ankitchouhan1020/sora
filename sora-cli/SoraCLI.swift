@@ -168,6 +168,16 @@ private enum SoraCLI {
 
     private static func run(_ arguments: [String]) async throws {
         guard let command = arguments.first else { throw CLIError.usage(usage) }
+        if command == "pane",
+           arguments.count == 1 || ["help", "--help", "-h"].contains(arguments[1]) {
+            print(paneUsage)
+            return
+        }
+        if command == "agent",
+           arguments.count == 1 || ["help", "--help", "-h"].contains(arguments[1]) {
+            print(agentUsage)
+            return
+        }
         let client = SoraClient()
         switch command {
         case "mcp":
@@ -180,6 +190,8 @@ private enum SoraCLI {
             print("Sora is running; local automation enabled; \(spaces.count) Space(s)")
         case "space":
             try runSpaceCommand(Array(arguments.dropFirst()), client: client)
+        case "pane":
+            try runPaneCommand(Array(arguments.dropFirst()), client: client)
         case "agent":
             try runAgentCommand(Array(arguments.dropFirst()), client: client)
         case "project":
@@ -285,33 +297,229 @@ private enum SoraCLI {
         }
     }
 
+    private static func runPaneCommand(
+        _ arguments: [String], client: SoraClient
+    ) throws {
+        guard let command = arguments.first else { throw CLIError.usage(paneUsage) }
+        let caller = try callerTerminalID()
+        var paneID: UUID?
+        var lines = 100
+        var timeout = 30_000
+        var text: String?
+        var directory: String?
+        var edge = SoraPaneEdge.right
+        var submit = false
+        var focus = false
+        var options: Set<String> = []
+        var index = 1
+        while index < arguments.count {
+            let option = arguments[index]
+            options.insert(option)
+            switch option {
+            case "--current": paneID = nil
+            case "--pane": paneID = try uuidValue(after: &index, in: arguments, option: option)
+            case "--lines": lines = try intValue(after: &index, in: arguments, option: option)
+            case "--timeout": timeout = try intValue(after: &index, in: arguments, option: option)
+            case "--text", "--contains": text = try value(after: &index, in: arguments, option: option)
+            case "--cwd": directory = absolutePath(try value(after: &index, in: arguments, option: option))
+            case "--left": edge = .left
+            case "--right": edge = .right
+            case "--up", "--top": edge = .top
+            case "--down", "--bottom": edge = .bottom
+            case "--submit", "--enter": submit = true
+            case "--focus": focus = true
+            default: throw CLIError.usage(paneUsage)
+            }
+            index += 1
+        }
+
+        let result: SoraAutomationResult
+        switch command {
+        case "current":
+            guard arguments.count == 1 else { throw CLIError.usage(paneUsage) }
+            result = try client.send(.currentPane(callerTerminalID: caller))
+        case "list":
+            guard arguments.count == 1 else { throw CLIError.usage(paneUsage) }
+            result = try client.send(.listPanes(callerTerminalID: caller))
+        case "split":
+            guard options.isSubset(of: [
+                "--current", "--pane", "--cwd", "--left", "--right", "--up", "--top",
+                "--down", "--bottom", "--focus",
+            ]) else { throw CLIError.usage(paneUsage) }
+            result = try client.send(.splitPane(
+                callerTerminalID: caller, paneID: paneID, edge: edge,
+                directory: directory, focus: focus
+            ))
+        case "send":
+            guard let text, options.isSubset(of: [
+                "--current", "--pane", "--text", "--submit", "--enter",
+            ]) else { throw CLIError.usage(paneUsage) }
+            result = try client.send(.sendPaneInput(
+                callerTerminalID: caller, paneID: paneID, text: text, submit: submit
+            ))
+        case "read":
+            guard options.isSubset(of: ["--current", "--pane", "--lines"])
+            else { throw CLIError.usage(paneUsage) }
+            result = try client.send(.readPaneOutput(
+                callerTerminalID: caller, paneID: paneID, lines: lines
+            ))
+        case "wait":
+            guard let text, options.isSubset(of: [
+                "--current", "--pane", "--contains", "--timeout", "--lines",
+            ]) else { throw CLIError.usage(paneUsage) }
+            result = try client.send(.waitForPaneOutput(
+                callerTerminalID: caller, paneID: paneID, contains: text,
+                timeoutMilliseconds: timeout, lines: lines
+            ))
+        case "focus":
+            guard options.isSubset(of: ["--current", "--pane"])
+            else { throw CLIError.usage(paneUsage) }
+            result = try client.send(.focusPane(
+                callerTerminalID: caller, paneID: paneID
+            ))
+        default: throw CLIError.usage(paneUsage)
+        }
+
+        switch result {
+        case .pane(let pane): printPane(pane)
+        case .panes(let panes): panes.forEach(printPane)
+        case .output(let output): print(output)
+        case .acknowledged: break
+        default: throw CLIError.transport("Unexpected response")
+        }
+    }
+
+    private static func printPane(_ pane: SoraPaneSummary) {
+        print("\(pane.id.uuidString)\t\(pane.content.rawValue)\t\(pane.title)\t\(pane.directory ?? "")")
+    }
+
+    private static func callerTerminalID() throws -> UUID {
+        guard let value = ProcessInfo.processInfo.environment["SORA_TERMINAL_ID"],
+              let id = UUID(uuidString: value) else {
+            throw CLIError.usage("This command must run inside a Sora terminal.")
+        }
+        return id
+    }
+
+    private static func value(
+        after index: inout Int, in arguments: [String], option: String
+    ) throws -> String {
+        index += 1
+        guard index < arguments.count else { throw CLIError.usage("\(option) requires a value") }
+        return arguments[index]
+    }
+
+    private static func intValue(
+        after index: inout Int, in arguments: [String], option: String
+    ) throws -> Int {
+        let raw = try value(after: &index, in: arguments, option: option)
+        guard let result = Int(raw), result > 0 else {
+            throw CLIError.usage("\(option) requires a positive integer")
+        }
+        return result
+    }
+
+    private static func uuidValue(
+        after index: inout Int, in arguments: [String], option: String
+    ) throws -> UUID {
+        let raw = try value(after: &index, in: arguments, option: option)
+        guard let result = UUID(uuidString: raw) else {
+            throw CLIError.usage("\(option) requires a pane UUID")
+        }
+        return result
+    }
+
     private static func runAgentCommand(
         _ arguments: [String], client: SoraClient
     ) throws {
         switch arguments.first {
-        case "install" where arguments == ["install", "pi"]:
-            let base = ProcessInfo.processInfo.environment["PI_CODING_AGENT_DIR"]
-                .map { URL(fileURLWithPath: $0, isDirectory: true) }
-                ?? FileManager.default.homeDirectoryForCurrentUser
-                    .appendingPathComponent(".pi/agent", isDirectory: true)
-            let directory = base.appendingPathComponent("extensions", isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let file = directory.appendingPathComponent("sora-agent-state.ts")
-            try Data(piAgentExtension.utf8).write(to: file, options: .atomic)
-            print("Installed Pi integration at \(file.path)")
+        case "install", "uninstall":
+            guard arguments.count == 2 else { throw CLIError.usage(agentUsage) }
+            let integrations = try agentIntegrations(named: arguments[1])
+            let files = try integrations.map { ($0, try $0.contents()) }
+            for (integration, contents) in files {
+                if let existing = try? Data(contentsOf: integration.destination), existing != contents {
+                    throw CLIError.usage(
+                        "Refusing to overwrite conflicting \(integration.name) integration at \(integration.destination.path)"
+                    )
+                }
+            }
+            for (integration, contents) in files {
+                if arguments[0] == "install" {
+                    try FileManager.default.createDirectory(
+                        at: integration.destination.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try contents.write(to: integration.destination, options: .atomic)
+                    print("Installed \(integration.name) integration at \(integration.destination.path)")
+                } else if FileManager.default.fileExists(atPath: integration.destination.path) {
+                    try FileManager.default.removeItem(at: integration.destination)
+                    print("Removed \(integration.name) integration from \(integration.destination.path)")
+                }
+            }
         case "state":
             guard arguments.count == 2,
-                  let state = SoraAgentReportState(rawValue: arguments[1]),
-                  let value = ProcessInfo.processInfo.environment["SORA_TERMINAL_ID"],
-                  let terminalID = UUID(uuidString: value)
+                  let state = SoraAgentReportState(rawValue: arguments[1])
             else { throw CLIError.usage("Usage: sora agent state <working|blocked|idle>") }
             guard case .acknowledged = try client.send(
-                .reportAgentState(terminalID: terminalID, state: state),
+                .reportAgentState(terminalID: try callerTerminalID(), state: state),
                 launchIfNeeded: false
             ) else { throw CLIError.transport("Unexpected response") }
         default:
-            throw CLIError.usage("Usage: sora agent install pi")
+            throw CLIError.usage(agentUsage)
         }
+    }
+
+    private struct AgentIntegration {
+        let name: String
+        let destination: URL
+        let bundledResource: String?
+
+        func contents() throws -> Data {
+            if let bundledResource {
+                let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+                let resource = executable.deletingLastPathComponent().deletingLastPathComponent()
+                    .appendingPathComponent("Resources/\(bundledResource)")
+                guard let data = try? Data(contentsOf: resource) else { throw CLIError.unavailable }
+                return data
+            }
+            return Data(piAgentExtension.utf8)
+        }
+    }
+
+    private static func agentIntegrations(named name: String) throws -> [AgentIntegration] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let piBase = ProcessInfo.processInfo.environment["PI_CODING_AGENT_DIR"]
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? home.appendingPathComponent(".pi/agent", isDirectory: true)
+        let integrations = [
+            AgentIntegration(
+                name: "Pi",
+                destination: piBase.appendingPathComponent("extensions/sora-agent-state.ts"),
+                bundledResource: nil
+            ),
+            AgentIntegration(
+                name: "OpenCode",
+                destination: URL(fileURLWithPath:
+                    ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
+                        ?? home.appendingPathComponent(".config").path
+                ).appendingPathComponent("opencode/plugins/sora-agent-state.js"),
+                bundledResource: "sora-agent-state.js"
+            ),
+            AgentIntegration(
+                name: "Grok",
+                destination: URL(fileURLWithPath:
+                    ProcessInfo.processInfo.environment["GROK_HOME"]
+                        ?? home.appendingPathComponent(".grok").path
+                ).appendingPathComponent("hooks/sora-agent-state.json"),
+                bundledResource: "sora-agent-state.grok.json"
+            ),
+        ]
+        if name == "all" { return integrations }
+        guard let integration = integrations.first(where: { $0.name.lowercased() == name }) else {
+            throw CLIError.usage(agentUsage)
+        }
+        return [integration]
     }
 
     private static func parseRun(
@@ -385,6 +593,22 @@ private enum SoraCLI {
     """#
 
     private static let runUsage = "sora run --space <id-or-path> [--name <name>] -- <command> [arguments…]"
+    private static let paneUsage = """
+    Usage:
+      sora pane current
+      sora pane list
+      sora pane split [--pane <id>] [--left|--right|--up|--down] [--cwd <path>] [--focus]
+      sora pane send [--pane <id>] --text <text> [--submit]
+      sora pane read [--pane <id>] [--lines <count>]
+      sora pane wait [--pane <id>] --contains <text> [--timeout <ms>] [--lines <count>]
+      sora pane focus [--pane <id>]
+    """
+    private static let agentUsage = """
+    Usage:
+      sora agent install <pi|opencode|grok|all>
+      sora agent uninstall <pi|opencode|grok|all>
+      sora agent state <working|blocked|idle>
+    """
     private static let spaceUsage = """
     Usage:
       sora space list
@@ -402,7 +626,10 @@ private enum SoraCLI {
       sora space select <id>
       sora space rename <id> <name>
       sora space remove <id> --force
-      sora agent install pi
+      sora pane <current|list|split|send|read|wait|focus> [options]
+      sora agent install <pi|opencode|grok|all>
+      sora agent uninstall <pi|opencode|grok|all>
+      sora agent state <working|blocked|idle>
       sora open <path>
       sora send <terminal-id> <text> [--submit]
       sora output <terminal-id> [--lines <count>]

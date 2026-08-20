@@ -1,0 +1,33 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "[ -n \"$SORA_BIN_PATH\" ] && [ -n \"$SORA_TERMINAL_ID\" ] && [ -x \"$SORA_BIN_PATH\" ] || exit 0; exec \"$SORA_BIN_PATH\" agent state working # SORA_INTEGRATION_ID=grok",
+        "timeout": 2
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "[ -n \"$SORA_BIN_PATH\" ] && [ -n \"$SORA_TERMINAL_ID\" ] && [ -x \"$SORA_BIN_PATH\" ] || exit 0; exec \"$SORA_BIN_PATH\" agent state idle # SORA_INTEGRATION_ID=grok",
+        "timeout": 2
+      }]
+    }],
+    "StopFailure": [{
+      "hooks": [{
+        "type": "command",
+        "command": "[ -n \"$SORA_BIN_PATH\" ] && [ -n \"$SORA_TERMINAL_ID\" ] && [ -x \"$SORA_BIN_PATH\" ] || exit 0; exec \"$SORA_BIN_PATH\" agent state blocked # SORA_INTEGRATION_ID=grok",
+        "timeout": 2
+      }]
+    }],
+    "Notification": [{
+      "matcher": "agent_error",
+      "hooks": [{
+        "type": "command",
+        "command": "[ -n \"$SORA_BIN_PATH\" ] && [ -n \"$SORA_TERMINAL_ID\" ] && [ -x \"$SORA_BIN_PATH\" ] || exit 0; exec \"$SORA_BIN_PATH\" agent state blocked # SORA_INTEGRATION_ID=grok",
+        "timeout": 2
+      }]
+    }]
+  }
+}

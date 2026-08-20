@@ -113,7 +113,6 @@ final class SoraAutomationIPC {
     }
 
     nonisolated private static func handle(_ client: Int32) {
-        defer { Darwin.close(client) }
         var noSigPipe: Int32 = 1
         _ = setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout.size(ofValue: noSigPipe)))
         var timeout = timeval(tv_sec: 5, tv_usec: 0)
@@ -121,23 +120,34 @@ final class SoraAutomationIPC {
         _ = setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, timeoutSize)
         _ = setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, timeoutSize)
 
-        guard let header = read(count: 4, from: client) else { return }
+        guard let header = read(count: 4, from: client) else {
+            Darwin.close(client)
+            return
+        }
         let length = header.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
         guard length > 0, length <= maximumRequestBytes,
               let data = read(count: Int(length), from: client),
               let request = try? JSONDecoder().decode(SoraAutomationRequest.self, from: data)
         else {
             write(.failure(.init(code: .invalidRequest, message: "Invalid automation request")), to: client)
+            Darwin.close(client)
             return
         }
 
-        let response = DispatchQueue.main.sync {
+        Task { @MainActor in
             let isAgentReport = if case .reportAgentState = request { true } else { false }
-            return AppSettings.shared.allowLocalAutomation || isAgentReport
-                ? SoraAutomationController.handle(request)
-                : .failure(.init(code: .automationDisabled, message: "Local automation is disabled"))
+            let response = if AppSettings.shared.allowLocalAutomation || isAgentReport {
+                await SoraAutomationController.handle(request)
+            } else {
+                SoraAutomationResponse.failure(.init(
+                    code: .automationDisabled, message: "Local automation is disabled"
+                ))
+            }
+            DispatchQueue.global(qos: .userInitiated).async {
+                write(response, to: client)
+                Darwin.close(client)
+            }
         }
-        write(response, to: client)
     }
 
     nonisolated private static func trustedHelper(on socket: Int32) -> Bool {

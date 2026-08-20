@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unrelease]
 
+- Let coding agents coordinate project-scoped terminal panes through Sora’s CLI and MCP server, with trusted Pi, OpenCode, and Grok lifecycle reporting.
+
 ## [0.4.0]
 
 - See working, blocked, completed, idle, and unknown coding-agent states across Spaces, and jump directly to agents from Search.

@@ -33,12 +33,44 @@ nonisolated enum SoraAutomationRequest: Codable, Equatable {
     case readOutput(terminalID: UUID, lines: Int)
     case closeTerminal(id: UUID)
     case reportAgentState(terminalID: UUID, state: SoraAgentReportState)
+
+    // Pane operations are capability-scoped by the terminal invoking them.
+    // A nil pane target means that invoking terminal's pane.
+    case currentPane(callerTerminalID: UUID)
+    case listPanes(callerTerminalID: UUID)
+    case splitPane(
+        callerTerminalID: UUID, paneID: UUID?, edge: SoraPaneEdge,
+        directory: String?, focus: Bool
+    )
+    case sendPaneInput(
+        callerTerminalID: UUID, paneID: UUID?, text: String, submit: Bool
+    )
+    case readPaneOutput(callerTerminalID: UUID, paneID: UUID?, lines: Int)
+    case waitForPaneOutput(
+        callerTerminalID: UUID, paneID: UUID?, contains: String,
+        timeoutMilliseconds: Int, lines: Int
+    )
+    case focusPane(callerTerminalID: UUID, paneID: UUID?)
 }
 
 nonisolated enum SoraAgentReportState: String, Codable, Equatable {
     case working
     case blocked
     case idle
+}
+
+nonisolated enum SoraPaneEdge: String, Codable, Equatable {
+    case left
+    case right
+    case top
+    case bottom
+}
+
+nonisolated enum SoraPaneContentKind: String, Codable, Equatable {
+    case terminal
+    case file
+    case browser
+    case diff
 }
 
 nonisolated struct SoraSpaceReference: Codable, Equatable {
@@ -68,6 +100,8 @@ nonisolated enum SoraAutomationResult: Codable, Equatable {
     case projects([SoraProjectSummary])
     case project(SoraProjectSummary)
     case terminal(SoraTerminalSummary)
+    case pane(SoraPaneSummary)
+    case panes([SoraPaneSummary])
     case output(String)
     case acknowledged
 }
@@ -98,6 +132,19 @@ nonisolated struct SoraTerminalSummary: Codable, Equatable {
     var exited: Bool
 }
 
+nonisolated struct SoraPaneSummary: Codable, Equatable {
+    var id: UUID
+    var projectID: UUID
+    var tabID: UUID
+    var terminalID: UUID?
+    var title: String
+    var content: SoraPaneContentKind
+    var directory: String?
+    var focused: Bool
+    var caller: Bool
+    var exited: Bool?
+}
+
 nonisolated struct SoraAutomationFailure: Error, Codable, Equatable {
     enum Code: String, Codable {
         case automationDisabled
@@ -107,6 +154,10 @@ nonisolated struct SoraAutomationFailure: Error, Codable, Equatable {
         case projectNotFound
         case terminalNotFound
         case terminalExited
+        case paneNotFound
+        case paneNotTerminal
+        case paneNotSplittable
+        case waitTimedOut
         case noWindow
         case outputUnavailable
         case internalError

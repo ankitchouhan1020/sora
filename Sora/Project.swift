@@ -279,6 +279,37 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
         tab.split(Pane(content: .session(session)), toward: edge)
     }
 
+    /// Creates a terminal beside an explicitly scoped pane without changing
+    /// the visible selection unless automation requested focus.
+    func automationSplitTerminal(
+        beside paneID: UUID,
+        toward edge: PaneDropEdge,
+        directory: String?,
+        focus: Bool
+    ) -> (tab: PaneTab, pane: Pane, session: TerminalSession)? {
+        guard let tab = tabs.first(where: { tab in
+            tab.allPanes.contains { $0.id == paneID }
+        }), let target = tab.allPanes.first(where: { $0.id == paneID }),
+              !target.content.isDiff else { return nil }
+
+        let previousFocus = tab.focusedPaneID
+        tab.focusedPaneID = paneID
+        let targetDirectory: String? = if case .session(let session) = target.content {
+            session.currentDirectoryPath
+        } else {
+            nil
+        }
+        let session = makeSession(directory: directory ?? targetDirectory)
+        let pane = Pane(content: .session(session))
+        tab.split(pane, toward: edge)
+        if focus {
+            selectedTabID = tab.id
+        } else {
+            tab.focusedPaneID = previousFocus
+        }
+        return (tab, pane, session)
+    }
+
     func focusLeft() { selectedTab?.focusLeft() }
     func focusRight() { selectedTab?.focusRight() }
     func focusUp() { selectedTab?.focusUp() }

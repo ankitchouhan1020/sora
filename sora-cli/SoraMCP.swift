@@ -25,8 +25,64 @@ struct SoraMCP {
         _ parameters: CallTool.Parameters, client: SoraClient
     ) async -> CallTool.Result {
         let arguments = parameters.arguments ?? [:]
+        if arguments["pane_id"] != nil, uuid(arguments, "pane_id") == nil {
+            return failure(.invalidRequest, "pane_id must be a UUID")
+        }
         do {
             switch parameters.name {
+            case "sora_current_pane":
+                guard let caller = callerTerminalID() else { return callerFailure() }
+                return try result(client.send(.currentPane(callerTerminalID: caller)))
+            case "sora_list_panes":
+                guard let caller = callerTerminalID() else { return callerFailure() }
+                return try result(client.send(.listPanes(callerTerminalID: caller)))
+            case "sora_split_pane":
+                guard let caller = callerTerminalID() else { return callerFailure() }
+                guard let edge = SoraPaneEdge(rawValue: arguments["edge"]?.stringValue ?? "right") else {
+                    return failure(.invalidRequest, "edge must be left, right, top, or bottom")
+                }
+                return try result(client.send(.splitPane(
+                    callerTerminalID: caller, paneID: uuid(arguments, "pane_id"), edge: edge,
+                    directory: arguments["cwd"]?.stringValue.map(absolutePath),
+                    focus: arguments["focus"]?.boolValue ?? false
+                )))
+            case "sora_send_pane_input":
+                guard let caller = callerTerminalID() else { return callerFailure() }
+                guard let text = arguments["text"]?.stringValue else {
+                    return failure(.invalidRequest, "text is required")
+                }
+                return try result(client.send(.sendPaneInput(
+                    callerTerminalID: caller, paneID: uuid(arguments, "pane_id"), text: text,
+                    submit: arguments["submit"]?.boolValue ?? false
+                )))
+            case "sora_read_pane_output":
+                guard let caller = callerTerminalID() else { return callerFailure() }
+                return try result(client.send(.readPaneOutput(
+                    callerTerminalID: caller, paneID: uuid(arguments, "pane_id"),
+                    lines: arguments["lines"]?.intValue ?? 100
+                )))
+            case "sora_wait_for_pane_output":
+                guard let caller = callerTerminalID() else { return callerFailure() }
+                guard let contains = arguments["contains"]?.stringValue else {
+                    return failure(.invalidRequest, "contains is required")
+                }
+                return try result(client.send(.waitForPaneOutput(
+                    callerTerminalID: caller, paneID: uuid(arguments, "pane_id"), contains: contains,
+                    timeoutMilliseconds: arguments["timeout_ms"]?.intValue ?? 30_000,
+                    lines: arguments["lines"]?.intValue ?? 100
+                )))
+            case "sora_focus_pane":
+                guard let caller = callerTerminalID() else { return callerFailure() }
+                return try result(client.send(.focusPane(
+                    callerTerminalID: caller, paneID: uuid(arguments, "pane_id")
+                )))
+            case "sora_report_agent_state":
+                guard let caller = callerTerminalID() else { return callerFailure() }
+                guard let rawState = arguments["state"]?.stringValue,
+                      let state = SoraAgentReportState(rawValue: rawState) else {
+                    return failure(.invalidRequest, "state must be working, blocked, or idle")
+                }
+                return try result(client.send(.reportAgentState(terminalID: caller, state: state)))
             case "sora_list_spaces":
                 return try result(client.send(.listSpaces))
             case "sora_create_space":
@@ -120,6 +176,10 @@ struct SoraMCP {
             value = .object(["project": projectValue(project)])
         case .terminal(let terminal):
             value = .object(["terminal": terminalValue(terminal)])
+        case .pane(let pane):
+            value = .object(["pane": paneValue(pane)])
+        case .panes(let panes):
+            value = .object(["panes": .array(panes.map(paneValue))])
         case .output(let output):
             value = .object(["output": .string(output)])
         case .acknowledged:
@@ -176,6 +236,29 @@ struct SoraMCP {
         ])
     }
 
+    private static func paneValue(_ pane: SoraPaneSummary) -> Value {
+        .object([
+            "id": .string(pane.id.uuidString),
+            "project_id": .string(pane.projectID.uuidString),
+            "tab_id": .string(pane.tabID.uuidString),
+            "terminal_id": pane.terminalID.map { .string($0.uuidString) } ?? .null,
+            "title": .string(pane.title),
+            "content": .string(pane.content.rawValue),
+            "directory": pane.directory.map(Value.string) ?? .null,
+            "focused": .bool(pane.focused),
+            "caller": .bool(pane.caller),
+            "exited": pane.exited.map(Value.bool) ?? .null,
+        ])
+    }
+
+    private static func callerTerminalID() -> UUID? {
+        ProcessInfo.processInfo.environment["SORA_TERMINAL_ID"].flatMap(UUID.init(uuidString:))
+    }
+
+    private static func callerFailure() -> CallTool.Result {
+        failure(.invalidRequest, "This tool must run inside a Sora terminal")
+    }
+
     private static func uuid(_ arguments: [String: Value], _ key: String) -> UUID? {
         arguments[key]?.stringValue.flatMap(UUID.init(uuidString:))
     }
@@ -201,6 +284,35 @@ struct SoraMCP {
     }
 
     private static let tools: [Tool] = [
+        tool("sora_current_pane", "Get the invoking terminal pane"),
+        tool("sora_list_panes", "List panes in the invoking terminal's project"),
+        tool("sora_split_pane", "Split a terminal pane in the current project", properties: [
+            "pane_id": string("Target pane UUID; defaults to the invoking pane"),
+            "edge": string("left, right, top, or bottom; defaults to right"),
+            "cwd": string("Directory for the new terminal"),
+            "focus": boolean("Focus the new pane; defaults to false"),
+        ]),
+        tool("sora_send_pane_input", "Send raw input to a terminal pane", properties: [
+            "pane_id": string("Target pane UUID; defaults to the invoking pane"),
+            "text": string("Text to send"),
+            "submit": boolean("Also send Enter"),
+        ], required: ["text"]),
+        tool("sora_read_pane_output", "Read terminal output without changing focus", properties: [
+            "pane_id": string("Target pane UUID; defaults to the invoking pane"),
+            "lines": integer("Lines to return (1–500)"),
+        ]),
+        tool("sora_wait_for_pane_output", "Wait until terminal output contains text", properties: [
+            "pane_id": string("Target pane UUID; defaults to the invoking pane"),
+            "contains": string("Text to wait for"),
+            "timeout_ms": integer("Timeout in milliseconds (100–300000)"),
+            "lines": integer("Lines to search (1–500)"),
+        ], required: ["contains"]),
+        tool("sora_focus_pane", "Focus a pane in the current project", properties: [
+            "pane_id": string("Target pane UUID; defaults to the invoking pane"),
+        ]),
+        tool("sora_report_agent_state", "Report the invoking agent's trusted lifecycle state", properties: [
+            "state": string("working, blocked, or idle"),
+        ], required: ["state"]),
         tool("sora_list_spaces", "List Spaces open in Sora"),
         tool("sora_create_space", "Create a Sora Space", properties: [
             "name": string("Space name"),
@@ -268,5 +380,13 @@ struct SoraMCP {
 
     private static func string(_ description: String) -> Value {
         .object(["type": "string", "description": .string(description)])
+    }
+
+    private static func boolean(_ description: String) -> Value {
+        .object(["type": "boolean", "description": .string(description)])
+    }
+
+    private static func integer(_ description: String) -> Value {
+        .object(["type": "integer", "description": .string(description)])
     }
 }

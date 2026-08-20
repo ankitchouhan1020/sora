@@ -12,7 +12,7 @@ A native terminal workspace for macOS.
 - Git intergration
 - Organize work into Spaces
 - File tree
-- Local automation through the bundled `sora` CLI and MCP server, including Space creation, selection, renaming, removal, and terminal spawning
+- Project-scoped pane and Space automation through the bundled `sora` CLI and MCP server
 
 ## CLI
 
@@ -23,12 +23,15 @@ sora space select <space-id>
 sora space rename <space-id> "Review auth"
 sora run --space <space-id> -- npm test
 sora space remove <space-id> --force
-sora agent install pi
+sora pane split --right
+sora pane send --pane <pane-id> --text "npm test" --submit
+sora pane wait --pane <pane-id> --contains "passed"
+sora agent install <pi|opencode|grok|all>
 ```
 
-The Pi integration reports working, needs-input, and idle lifecycle states to Sora; other detected agents remain Unknown until they have a trusted integration.
+Pane commands stay inside the invoking terminal's project. Pi, OpenCode, and Grok integrations report trusted working, blocked, and idle lifecycle states; other detected agents remain Unknown.
 
-The same Space operations are available through `sora mcp`.
+The same Space and pane operations are available through `sora mcp` when it runs inside a Sora terminal.
 
 ## Download
 

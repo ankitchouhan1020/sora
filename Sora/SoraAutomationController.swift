@@ -6,10 +6,23 @@ import Foundation
 enum SoraAutomationController {
     private static let maximumTextBytes = 64 * 1024
     private static let maximumOutputLines = 500
+    private static let maximumWaitMilliseconds = 300_000
 
-    static func handle(_ request: SoraAutomationRequest) -> SoraAutomationResponse {
+    private struct PaneContext {
+        let manager: TerminalManager
+        let project: Project
+        let tab: PaneTab
+        let pane: Pane
+
+        var session: TerminalSession? {
+            if case .session(let session) = pane.content { return session }
+            return nil
+        }
+    }
+
+    static func handle(_ request: SoraAutomationRequest) async -> SoraAutomationResponse {
         do {
-            return .success(try execute(request))
+            return .success(try await execute(request))
         } catch let failure as SoraAutomationFailure {
             return .failure(failure)
         } catch {
@@ -17,7 +30,9 @@ enum SoraAutomationController {
         }
     }
 
-    private static func execute(_ request: SoraAutomationRequest) throws -> SoraAutomationResult {
+    private static func execute(
+        _ request: SoraAutomationRequest
+    ) async throws -> SoraAutomationResult {
         switch request {
         case .listSpaces:
             return .spaces(TerminalManager.automationManagers.flatMap(spaceSummaries))
@@ -87,22 +102,8 @@ enum SoraAutomationController {
             session.sendCommand(text + (submit ? "\r" : ""))
             return .acknowledged
         case .readOutput(let terminalID, let lines):
-            guard (1...maximumOutputLines).contains(lines) else {
-                throw failure(
-                    .invalidRequest,
-                    "lines must be between 1 and \(maximumOutputLines)"
-                )
-            }
             let (_, _, session) = try findTerminal(id: terminalID)
-            guard !session.hasExited else {
-                throw failure(.terminalExited, "Terminal has exited")
-            }
-            guard let output = TerminalHistorySerializer.previewText(
-                from: session.surface, maxLines: lines, maxColumns: 10_000
-            ) else {
-                throw failure(.outputUnavailable, "Terminal output is not available yet")
-            }
-            return .output(output)
+            return .output(try output(from: session, lines: lines))
         case .closeTerminal(let id):
             let (_, project, session) = try findTerminal(id: id)
             project.closeContent(.session(session))
@@ -119,6 +120,77 @@ enum SoraAutomationController {
                 isVisible: manager.isViewing(session, in: project)
             )
             return .acknowledged
+        case .currentPane(let callerTerminalID):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            return .pane(paneSummary(caller, callerPaneID: caller.pane.id))
+        case .listPanes(let callerTerminalID):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            return .panes(projectPaneContexts(caller.project, manager: caller.manager).map {
+                paneSummary($0, callerPaneID: caller.pane.id)
+            })
+        case let .splitPane(callerTerminalID, paneID, edge, directory, shouldFocus):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            let target = try targetPane(paneID, caller: caller)
+            guard !target.pane.content.isDiff else {
+                throw failure(.paneNotSplittable, "Diff panes cannot be split")
+            }
+            let directory = try directory.map(canonicalDirectory)
+            guard let created = caller.project.automationSplitTerminal(
+                beside: target.pane.id,
+                toward: paneDropEdge(edge),
+                directory: directory,
+                focus: shouldFocus
+            ) else {
+                throw failure(.paneNotSplittable, "Pane could not be split")
+            }
+            let context = PaneContext(
+                manager: caller.manager, project: caller.project,
+                tab: created.tab, pane: created.pane
+            )
+            if shouldFocus { focus(context) }
+            return .pane(paneSummary(context, callerPaneID: caller.pane.id))
+        case let .sendPaneInput(callerTerminalID, paneID, text, submit):
+            try validateText(text, field: "text")
+            let caller = try callerContext(terminalID: callerTerminalID)
+            let session = try terminal(in: targetPane(paneID, caller: caller))
+            session.sendCommand(text + (submit ? "\r" : ""))
+            return .acknowledged
+        case let .readPaneOutput(callerTerminalID, paneID, lines):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            let session = try terminal(in: targetPane(paneID, caller: caller))
+            return .output(try output(from: session, lines: lines))
+        case let .waitForPaneOutput(
+            callerTerminalID, paneID, needle, timeoutMilliseconds, lines
+        ):
+            guard !needle.isEmpty else {
+                throw failure(.invalidRequest, "contains is required")
+            }
+            try validateText(needle, field: "contains")
+            try validateLines(lines)
+            guard (100...maximumWaitMilliseconds).contains(timeoutMilliseconds) else {
+                throw failure(
+                    .invalidRequest,
+                    "timeoutMilliseconds must be between 100 and \(maximumWaitMilliseconds)"
+                )
+            }
+            let caller = try callerContext(terminalID: callerTerminalID)
+            let session = try terminal(in: targetPane(paneID, caller: caller))
+            let deadline = Date().addingTimeInterval(Double(timeoutMilliseconds) / 1_000)
+            repeat {
+                if let text = try? output(from: session, lines: lines), text.contains(needle) {
+                    return .output(text)
+                }
+                if session.hasExited {
+                    throw failure(.terminalExited, "Terminal has exited")
+                }
+                try await Task.sleep(for: .milliseconds(100))
+            } while Date() < deadline
+            throw failure(.waitTimedOut, "Timed out waiting for terminal output")
+        case .focusPane(let callerTerminalID, let paneID):
+            let caller = try callerContext(terminalID: callerTerminalID)
+            let target = try targetPane(paneID, caller: caller)
+            focus(target)
+            return .pane(paneSummary(target, callerPaneID: caller.pane.id))
         }
     }
 
@@ -223,6 +295,117 @@ enum SoraAutomationController {
             }
         }
         throw failure(.projectNotFound, "Project not found")
+    }
+
+    private static func callerContext(terminalID: UUID) throws -> PaneContext {
+        for manager in TerminalManager.automationManagers {
+            for project in manager.projects {
+                for tab in project.tabs {
+                    for pane in tab.allPanes {
+                        guard case .session(let session) = pane.content,
+                              session.id == terminalID else { continue }
+                        return PaneContext(
+                            manager: manager, project: project, tab: tab, pane: pane
+                        )
+                    }
+                }
+            }
+        }
+        throw failure(.terminalNotFound, "Invoking terminal is no longer open")
+    }
+
+    private static func projectPaneContexts(
+        _ project: Project, manager: TerminalManager
+    ) -> [PaneContext] {
+        project.tabs.flatMap { tab in
+            tab.allPanes.map {
+                PaneContext(manager: manager, project: project, tab: tab, pane: $0)
+            }
+        }
+    }
+
+    private static func targetPane(
+        _ paneID: UUID?, caller: PaneContext
+    ) throws -> PaneContext {
+        guard let paneID else { return caller }
+        guard let target = projectPaneContexts(caller.project, manager: caller.manager)
+            .first(where: { $0.pane.id == paneID }) else {
+            throw failure(.paneNotFound, "Pane was not found in the invoking project")
+        }
+        return target
+    }
+
+    private static func terminal(in context: PaneContext) throws -> TerminalSession {
+        guard let session = context.session else {
+            throw failure(.paneNotTerminal, "Pane is not a terminal")
+        }
+        guard !session.hasExited else {
+            throw failure(.terminalExited, "Terminal has exited")
+        }
+        return session
+    }
+
+    private static func paneSummary(
+        _ context: PaneContext, callerPaneID: UUID
+    ) -> SoraPaneSummary {
+        let kind: SoraPaneContentKind = switch context.pane.content {
+        case .session: .terminal
+        case .file: .file
+        case .browser: .browser
+        case .diff: .diff
+        }
+        return SoraPaneSummary(
+            id: context.pane.id,
+            projectID: context.project.id,
+            tabID: context.tab.id,
+            terminalID: context.session?.id,
+            title: context.pane.content.title,
+            content: kind,
+            directory: context.session?.currentDirectoryPath,
+            focused: context.manager.selectedProjectID == context.project.id
+                && context.project.selectedTabID == context.tab.id
+                && context.tab.focusedPaneID == context.pane.id,
+            caller: context.pane.id == callerPaneID,
+            exited: context.session?.hasExited
+        )
+    }
+
+    private static func focus(_ context: PaneContext) {
+        context.manager.selectedProjectID = context.project.id
+        context.project.selectedTabID = context.tab.id
+        context.tab.focusedPaneID = context.pane.id
+        context.manager.activateForAutomation()
+    }
+
+    private static func paneDropEdge(_ edge: SoraPaneEdge) -> PaneDropEdge {
+        switch edge {
+        case .left: .left
+        case .right: .right
+        case .top: .top
+        case .bottom: .bottom
+        }
+    }
+
+    private static func validateLines(_ lines: Int) throws {
+        guard (1...maximumOutputLines).contains(lines) else {
+            throw failure(
+                .invalidRequest,
+                "lines must be between 1 and \(maximumOutputLines)"
+            )
+        }
+    }
+
+    private static func output(from session: TerminalSession, lines: Int) throws -> String {
+        try validateLines(lines)
+        guard !session.hasExited else {
+            throw failure(.terminalExited, "Terminal has exited")
+        }
+        guard let output = TerminalHistorySerializer.previewText(
+            from: session.surface, maxLines: lines, maxColumns: 10_000
+        ) else {
+            throw failure(.outputUnavailable, "Terminal output is not available yet")
+        }
+        return output
     }
 
     private static func findTerminal(
