@@ -32,6 +32,11 @@ struct TerminalHostView: NSViewRepresentable {
         container.terminal = session.surface
         container.focusOnAppear = isFocused
         let terminal = session.surface
+        // A reparented Metal surface can spend one frame without a drawable.
+        // Paint both AppKit layers so that frame matches the pane, not white.
+        container.wantsLayer = true
+        container.layer?.backgroundColor = Theme.background.cgColor
+        terminal.layer?.backgroundColor = Theme.background.cgColor
         terminal.onBecomeFirstResponder = onFocused
         terminal.splitTarget.onSplit = onSplit
         terminal.splitTarget.onNewBrowserTab = onNewBrowserTab
@@ -69,6 +74,8 @@ struct TerminalHostView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: NSView, context: Context) {
+        view.layer?.backgroundColor = Theme.background.cgColor
+        session.surface.layer?.backgroundColor = Theme.background.cgColor
         session.surface.onBecomeFirstResponder = onFocused
         session.surface.splitTarget.onSplit = onSplit
         session.surface.splitTarget.onNewBrowserTab = onNewBrowserTab

@@ -159,6 +159,8 @@ struct SidebarView: View {
 
     private func spaceCanvas(_ project: Project) -> some View {
         tabList(project)
+            .contentShape(Rectangle())
+            .contextMenu { spaceActions(for: project) }
     }
 
     private func tabList(_ project: Project) -> some View {
@@ -299,7 +301,6 @@ struct SidebarView: View {
                     ForEach(Array(manager.projects.enumerated()), id: \.element.id) { index, project in
                         let isSelected = project.id == manager.selectedProjectID
                         let agentCount = project.agentSessions.count
-                        let agentState = project.agentState
                         Button {
                             manager.selectedProjectID = project.id
                         } label: {
@@ -315,13 +316,6 @@ struct SidebarView: View {
                                 }
                             }
                             .frame(width: project.customIcon == nil ? 14 : 18, height: 18)
-                            .overlay {
-                                if let agentState {
-                                    Circle()
-                                        .stroke(agentState.color, lineWidth: 1.5)
-                                        .frame(width: 14, height: 14)
-                                }
-                            }
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
@@ -410,7 +404,9 @@ struct SidebarView: View {
 
     @ViewBuilder
     private func spaceActions(for project: Project) -> some View {
-        Button("Rename…") { beginRename(project) }
+        Button("New Space") { manager.presentSpaceCreator() }
+        Divider()
+        Button("Rename Space…") { beginRename(project) }
         Button("Change Icon…") { beginIconChange(project) }
         Divider()
         Button("Remove Space…", role: .destructive) { manager.close(project) }
@@ -512,8 +508,6 @@ struct SidebarView: View {
             return
         }
 
-        // Preserve the incoming Space's live on-screen position when it
-        // becomes selected, then let the spring carry it the rest of the way.
         let incomingOffset = translation < 0
             ? CGFloat(width) + swipeOffset
             : -CGFloat(width) + swipeOffset
@@ -535,13 +529,7 @@ struct SidebarView: View {
     }
 
     private func settleSpaceSwipe() {
-        if reduceMotion {
-            swipeOffset = 0
-        } else {
-            withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
-                swipeOffset = 0
-            }
-        }
+        swipeOffset = 0
     }
 
     private func rubberBand(_ offset: CGFloat, dimension: CGFloat) -> CGFloat {

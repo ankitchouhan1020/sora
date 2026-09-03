@@ -16,6 +16,11 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unrelease]
 
+## [0.5.1]
+
+- Manage Spaces from a right-click anywhere in the empty sidebar, with a cleaner footer and distraction-free switching.
+- Prevent terminal panes from flashing white while switching Spaces.
+
 ## [0.5.0]
 
 - Let coding agents coordinate Space-scoped pinned tabs and panes through Sora’s CLI, with readable direct prompts and trusted Pi, OpenCode, and Grok lifecycle reporting.
