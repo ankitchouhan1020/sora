@@ -19,9 +19,9 @@ const GITHUB_URL = 'https://github.com/ankitchouhan1020/sora'
 const BREW_COMMAND = 'brew install ankitchouhan1020/tap/sora'
 // Shown only if the appcast can't be reached; kept current so downloads still work.
 const FALLBACK: Release = {
-  version: '0.3.0',
+  version: '0.5.1',
   minSystem: '15.6',
-  dmg: `${RELEASES_ORIGIN}/sora-0.3.0.dmg`,
+  dmg: `${RELEASES_ORIGIN}/sora-0.5.1.dmg`,
 }
 
 /**
